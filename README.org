@@ -1,0 +1,68 @@
+#+TITLE: org-gmail: Fetch Gmail Threads into Org Mode
+
+* Introduction
+
+org-gmail is a package for Emacs that allows you to fetch entire Gmail threads or individual messages and save them as entries in your Org mode files. It uses the Gmail API via a companion Python script.
+
+* Features
+
+- Download all emails with a specific label.
+- Download new messages for a specific thread.
+- Insert new messages directly after the existing thread in your Org file.
+- Move messages or entire threads to the trash in Gmail.
+- Sync and find duplicate email IDs across your agenda files.
+
+* Installation
+
+** 1. Python Dependencies
+
+This package relies on a Python script with a few dependencies. You can install them using pip:
+
+#+BEGIN_SRC sh
+pip install --upgrade google-api-python-client google-auth-httplib2 google-auth-oauthlib html2text pytz
+#+END_SRC
+
+** 2. Gmail API Credentials
+
+You'll need to enable the Gmail API and download a `credentials.json` file.
+
+1. Go to the [[https://console.developers.google.com/][Google Cloud Console]].
+2. Create a new project.
+3. Enable the "Gmail API" for your project.
+4. Create credentials for a "Desktop app".
+5. Download the `credentials.json` file.
+
+** 3. Emacs Package Installation
+
+This package is designed to be installed with `straight.el`. Add the following to your Emacs configuration:
+
+#+BEGIN_SRC emacs-lisp
+(use-package org-gmail
+  :straight (org-gmail :type git :host github :repo "your-username/your-repo-name")
+  :commands (org-gmail-download-by-label
+             org-gmail-download-at-point
+             org-gmail-sync-email-ids
+             org-gmail-trash-at-point)
+  :config
+  ;; Your custom configuration here
+  )
+#+END_SRC
+
+* Configuration
+
+You can customize the behavior of `org-gmail` by setting the following variables in your Emacs configuration:
+
+#+BEGIN_SRC emacs-lisp
+(setq org-gmail-org-file "~/Documents/0Inbox/index.org")
+(setq org-gmail-credentials-file "~/.config/emacs/credentials.json")
+(setq org-gmail-python-script "~/path/to/your/gmail_label_manager.py")
+(setq org-gmail-date-drawer "org-gmail")
+(setq org-gmail-process-timeout 300)
+#+END_SRC
+
+* Usage
+
+- `M-x org-gmail-download-by-label`: Download all emails with a specific label.
+- `M-x org-gmail-download-at-point`: Download new messages for the thread at point.
+- `M-x org-gmail-sync-email-ids`: Sync and find duplicate email IDs.
+- `M-x org-gmail-trash-at-point`: Move the email or thread at point to the trash.
