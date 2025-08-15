@@ -100,7 +100,7 @@
                      (message "Finished downloading successfully.")
                      ;; Automatically close the sync buffer on success after 2 seconds
                      (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-                 (message "Error downloading emails: %s" (buffer-string))))))))
+                 (message "Error downloading emails. Check the %s buffer." (buffer-name (process-buffer proc))))))))
         (set-process-query-on-exit-flag process nil)
         (run-at-time org-gmail-process-timeout nil
                      (lambda ()
@@ -112,7 +112,7 @@
                                    (number-to-string org-gmail-process-timeout)
                                    " seconds\n"))
                          (message "Gmail sync timed out"))))
-        (when progress-reporter (progress-reporter-update progress-reporter 50))))))
+        (when progress-reporter (progress-reporter-update progress-reporter 50)))))))
 
 (defun org-gmail-download-by-label ()
   "Asynchronously fetch Gmail labels, then prompt the user to select one for download."
@@ -146,6 +146,7 @@
                                                                       (+ start-pos (length start-marker))
                                                                       end-pos)))
                                   (labels (split-string labels-str "\n" t)))
+                             (kill-buffer proc-buffer) ; Kill the fetch buffer before prompting
                              (run-with-timer 0 nil
                                              (lambda (labels-list)
                                                (let ((label-name (completing-read "Select Gmail label: " labels-list nil t)))
@@ -157,9 +158,8 @@
                                                        (org-gmail--run-sync-process command-args "*Gmail Sync*"))
                                                    (message "No label selected."))))
                                              labels))
-                         (message "Error: Could not extract label list from script output.")))
-                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer)))
-                 (kill-buffer proc-buffer))))))))))
+                         (message "Error: Could not extract label list from script output. Check the %s buffer." (buffer-name proc-buffer))))
+                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer))))))))))))
 
 (defun org-gmail-download-at-point ()
   "Download new messages for the thread at point and insert them after the last known message for that thread."
@@ -287,7 +287,7 @@
                              (goto-char point-to-delete)
                              (org-cut-subtree)))
                          (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-                     (message "Error moving %s to trash: %s" trash-target (buffer-string)))))))))))))
+                     (message "Error moving %s to trash. Check the %s buffer." trash-target (buffer-name (process-buffer proc))))))))))))))
 
 (provide 'org-gmail)
 
