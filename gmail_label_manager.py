@@ -48,6 +48,22 @@ def get_gmail_service(credentials_path='credentials.json'):
     service._http.timeout = API_TIMEOUT  # Set timeout for API calls
     return service
 
+def list_labels(service):
+    """Lists all user-created labels in the user's account."""
+    try:
+        results = service.users().labels().list(userId='me').execute()
+        labels = results.get('labels', [])
+        if not labels:
+            print("No labels found.", file=sys.stderr)
+        else:
+            # We only want user-created labels.
+            user_labels = [label['name'] for label in labels if label['type'] == 'user']
+            for label_name in sorted(user_labels):
+                print(label_name)
+    except HttpError as error:
+        print(f'An error occurred while listing labels: {error}', file=sys.stderr)
+        sys.exit(1)
+
 def delete_message(service, msg_id):
     """Moves a specific message to the trash."""
     try:
@@ -278,17 +294,18 @@ def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, th
     """Main function to drive the script's logic."""
     print(f"Starting main with: label='{label_name}', thread_id='{thread_id}', sync={do_sync_email_ids}", file=sys.stderr)
     
+    if do_sync_email_ids:
+        sync_email_ids(agenda_files, consolidate, org_file)
+        return
+
     service = get_gmail_service(credentials)
     print("Gmail service initialized successfully.", file=sys.stderr)
-
+    
     if delete_message_id:
         delete_message(service, delete_message_id)
         return
     if delete_thread_id:
         delete_thread(service, delete_thread_id)
-        return
-    if do_sync_email_ids:
-        sync_email_ids(agenda_files, consolidate, org_file)
         return
 
     messages = []
@@ -391,6 +408,7 @@ def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, th
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Download Gmail emails by label or thread into an Org-mode file, or sync EMAIL_IDs.")
+    # Add all arguments
     parser.add_argument('--label', help="Gmail label to search (e.g., '1Projects/MyProject')")
     parser.add_argument('--thread-id', help="Gmail thread ID to fetch new messages for")
     parser.add_argument('--org-file', help="Path to the Org-mode file to append emails")
@@ -401,10 +419,15 @@ if __name__ == '__main__':
     parser.add_argument('--credentials', default='credentials.json', help="Path to the Gmail API credentials file.")
     parser.add_argument('--delete-message', help="Gmail message ID to delete (trash).")
     parser.add_argument('--delete-thread', help="Gmail thread ID to delete (trash).")
-
+    parser.add_argument('--list-labels', action='store_true', help="List all user-created Gmail labels.")
+    
     args = parser.parse_args()
 
-    if args.delete_message:
+    # Determine which action to take
+    if args.list_labels:
+        service = get_gmail_service(args.credentials)
+        list_labels(service)
+    elif args.delete_message:
         main(delete_message_id=args.delete_message, credentials=args.credentials)
     elif args.delete_thread:
         main(delete_thread_id=args.delete_thread, credentials=args.credentials)
@@ -420,4 +443,4 @@ if __name__ == '__main__':
             parser.error("--thread-id requires --date-drawer and --agenda-files")
         main(thread_id=args.thread_id, org_file=args.org_file, date_drawer=args.date_drawer, agenda_files=args.agenda_files, credentials=args.credentials)
     else:
-        parser.error("You must provide a command: --label, --thread-id, --sync-email-ids, --delete-message, or --delete-thread.")
+        parser.error("You must provide a command: --label, --thread-id, --sync-email-ids, --delete-message, --delete-thread, or --list-labels.")

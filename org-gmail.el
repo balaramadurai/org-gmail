@@ -1,18 +1,37 @@
-;; -*- lexical-binding: t; -*-
+;;; org-gmail.el --- Fetch Gmail threads into Org mode -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024 Your Name
+
+;; Author: Your Name <you@example.com>
+;; Version: 0.1
+;; Keywords: org, gmail, email
+;; Package-Requires: ((emacs "25.1"))
+
+;;; Commentary:
+
+;; This package provides functions to fetch Gmail threads and messages
+;; into Org mode files. It uses the Gmail API via a Python script.
+
+;;; Code:
+
 (require 'subr-x)  ;; Ensure progress-reporter functions are available
 (require 'org)     ;; For org-save-all-org-buffers and org-element-at-point
+
+(defgroup org-gmail nil
+  "Settings for the org-gmail package."
+  :group 'org)
 
 (defcustom org-gmail-org-file "~/Documents/0Inbox/index.org"
   "Path to the Org-mode file where Gmail emails are saved."
   :type 'string
   :group 'org-gmail)
 
-(defcustom org-gmail-credentials-file "~/Documents/3Resources/emacs/pure-emacs/gmail-api-credentials.json"
+(defcustom org-gmail-credentials-file "~/.config/emacs/credentials.json"
   "Path to the Gmail API credentials.json file."
   :type 'string
   :group 'org-gmail)
 
-(defcustom org-gmail-python-script "~/Documents/3Resources/emacs/pure-emacs/gmail_label_manager.py"
+(defcustom org-gmail-python-script "~/bin/gmail_label_manager.py"
   "The full path to the gmail_label_manager.py script."
   :type 'string
   :group 'org-gmail)
@@ -73,24 +92,41 @@
         (when progress-reporter (progress-reporter-update progress-reporter 50))))))
 
 (defun org-gmail-download-by-label ()
-  "Download all Gmail emails with a specific project or area label."
+  "Asynchronously fetch Gmail labels, then prompt the user to select one for download."
   (interactive)
   (org-save-all-org-buffers)
-  (let* ((type (intern (completing-read "Download emails for (project or area): " '("project" "area") nil t)))
-         (names (pcase type
-                  ('project (my-get-project-names))
-                  ('area    (my-get-area-names))))
-         (name (completing-read (format "Select %s to download emails for: " type) names nil t)))
-    (when name
-      (let* ((base-label-prefix (pcase type
-                                  ('project "1Projects/")
-                                  ('area    "2Areas/")))
-             (label-name (concat base-label-prefix name))
-             (command-args (list "--label" label-name
-                                 "--org-file" org-gmail-org-file
-                                 "--date-drawer" org-gmail-date-drawer
-                                 "--agenda-files" (mapconcat #'identity org-agenda-files ","))))
-        (org-gmail--run-sync-process command-args "*Gmail Sync*")))))
+  (let* ((buffer-name "*Gmail Label Fetch*")
+         (buffer (get-buffer-create buffer-name))
+         (script-path (expand-file-name org-gmail-python-script))
+         (command (list "python3" script-path "--list-labels"
+                        "--credentials" (expand-file-name org-gmail-credentials-file))))
+    (org-gmail--display-sync-buffer buffer)
+    (with-current-buffer buffer
+      (erase-buffer)
+      (insert "Fetching Gmail labels...\n\n"))
+    (let ((process (apply #'start-process "gmail-labels" buffer command)))
+      (when process
+        (set-process-sentinel
+         process
+         (lambda (proc event)
+           (when (eq (process-status proc) 'exit)
+             (let ((proc-buffer (process-buffer proc)))
+               (with-current-buffer proc-buffer
+                 (if (zerop (process-exit-status proc))
+                     (let ((labels (split-string (buffer-string) "\n" t)))
+                       (run-with-timer 0 nil
+                                       (lambda (labels-list)
+                                         (let ((label-name (completing-read "Select Gmail label: " labels-list nil t)))
+                                           (if (not (string-empty-p label-name))
+                                               (let* ((command-args (list "--label" label-name
+                                                                          "--org-file" org-gmail-org-file
+                                                                          "--date-drawer" org-gmail-date-drawer
+                                                                          "--agenda-files" (mapconcat #'identity org-agenda-files ","))))
+                                                 (org-gmail--run-sync-process command-args "*Gmail Sync*"))
+                                             (message "No label selected."))))
+                                       labels)
+                       (kill-buffer proc-buffer))
+                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer))))))))))))
 
 (defun org-gmail-download-at-point ()
   "Download new messages for the thread at point and insert them after the last known message for that thread."
@@ -219,3 +255,7 @@
                              (org-cut-subtree)))
                          (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
                      (message "Error moving %s to trash: %s" trash-target (buffer-string)))))))))))))
+
+(provide 'org-gmail)
+
+;;; org-gmail.el ends here
