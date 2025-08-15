@@ -1,16 +1,39 @@
 ;;; org-gmail.el --- Fetch Gmail threads into Org mode -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2024 Your Name
+;; Copyright (C) 2025 Bala Ramadurai
 
-;; Author: Your Name <you@example.com>
+;; Author: Bala Ramadurai <bala@balaramadurai.net>
 ;; Version: 0.1
 ;; Keywords: org, gmail, email
 ;; Package-Requires: ((emacs "25.1"))
+
+;;; License:
+
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+
+;; The above copyright notice and this permission notice shall be included in all
+;; copies or substantial portions of the Software.
+
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+;; SOFTWARE.
 
 ;;; Commentary:
 
 ;; This package provides functions to fetch Gmail threads and messages
 ;; into Org mode files. It uses the Gmail API via a Python script.
+;;
+;; This code was developed with the assistance of Google's Gemini 2.5 
+;; and xAI's Grok 4.
 
 ;;; Code:
 
@@ -113,20 +136,30 @@
              (let ((proc-buffer (process-buffer proc)))
                (with-current-buffer proc-buffer
                  (if (zerop (process-exit-status proc))
-                     (let ((labels (split-string (buffer-string) "\n" t)))
-                       (run-with-timer 0 nil
-                                       (lambda (labels-list)
-                                         (let ((label-name (completing-read "Select Gmail label: " labels-list nil t)))
-                                           (if (not (string-empty-p label-name))
-                                               (let* ((command-args (list "--label" label-name
-                                                                          "--org-file" org-gmail-org-file
-                                                                          "--date-drawer" org-gmail-date-drawer
-                                                                          "--agenda-files" (mapconcat #'identity org-agenda-files ","))))
-                                                 (org-gmail--run-sync-process command-args "*Gmail Sync*"))
-                                             (message "No label selected."))))
-                                       labels)
-                       (kill-buffer proc-buffer))
-                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer))))))))))))
+                     (let* ((full-output (buffer-string))
+                            (start-marker "---LABEL_LIST_START---")
+                            (end-marker "---LABEL_LIST_END---")
+                            (start-pos (string-match (regexp-quote start-marker) full-output))
+                            (end-pos (string-match (regexp-quote end-marker) full-output)))
+                       (if (and start-pos end-pos)
+                           (let* ((labels-str (string-trim (substring full-output
+                                                                      (+ start-pos (length start-marker))
+                                                                      end-pos)))
+                                  (labels (split-string labels-str "\n" t)))
+                             (run-with-timer 0 nil
+                                             (lambda (labels-list)
+                                               (let ((label-name (completing-read "Select Gmail label: " labels-list nil t)))
+                                                 (if (not (string-empty-p label-name))
+                                                     (let* ((command-args (list "--label" label-name
+                                                                                "--org-file" org-gmail-org-file
+                                                                                "--date-drawer" org-gmail-date-drawer
+                                                                                "--agenda-files" (mapconcat #'identity org-agenda-files ","))))
+                                                       (org-gmail--run-sync-process command-args "*Gmail Sync*"))
+                                                   (message "No label selected."))))
+                                             labels))
+                         (message "Error: Could not extract label list from script output.")))
+                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer)))
+                 (kill-buffer proc-buffer))))))))))
 
 (defun org-gmail-download-at-point ()
   "Download new messages for the thread at point and insert them after the last known message for that thread."

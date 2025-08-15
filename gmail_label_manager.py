@@ -58,8 +58,10 @@ def list_labels(service):
         else:
             # We only want user-created labels.
             user_labels = [label['name'] for label in labels if label['type'] == 'user']
+            print("---LABEL_LIST_START---")
             for label_name in sorted(user_labels):
                 print(label_name)
+            print("---LABEL_LIST_END---")
     except HttpError as error:
         print(f'An error occurred while listing labels: {error}', file=sys.stderr)
         sys.exit(1)

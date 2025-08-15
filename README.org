@@ -6,7 +6,7 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 
 * Features
 
-- Download all emails with a specific label.
+- Download all emails with a specific label, chosen from a list fetched directly from Gmail.
 - Download new messages for a specific thread.
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
@@ -34,7 +34,7 @@ You'll need to enable the Gmail API and download a `credentials.json` file.
 
 ** 3. Emacs Package Installation
 
-This package is designed to be installed with `straight.el`. Add the following to your Emacs configuration:
+This package is designed to be installed with `straight.el`. Add the following to your Emacs configuration. Make sure to replace `"your-username/your-repo-name"` with your actual GitHub repository details.
 
 #+BEGIN_SRC emacs-lisp
   (use-package org-gmail
@@ -52,21 +52,9 @@ This package is designed to be installed with `straight.el`. Add the following t
     )
 #+END_SRC
 
-* Configuration
-
-You can customize the behavior of `org-gmail` by setting the following variables in your Emacs configuration:
-
-#+BEGIN_SRC emacs-lisp
-(setq org-gmail-org-file "~/Documents/0Inbox/index.org")
-(setq org-gmail-credentials-file "~/.config/emacs/credentials.json")
-(setq org-gmail-python-script "~/path/to/your/gmail_label_manager.py")
-(setq org-gmail-date-drawer "org-gmail")
-(setq org-gmail-process-timeout 300)
-#+END_SRC
-
 * Usage
 
-- `M-x org-gmail-download-by-label`: Download all emails with a specific label.
+- `M-x org-gmail-download-by-label`: Fetches a list of your Gmail labels and prompts you to select one to download.
 - `M-x org-gmail-download-at-point`: Download new messages for the thread at point.
 - `M-x org-gmail-sync-email-ids`: Sync and find duplicate email IDs.
 - `M-x org-gmail-trash-at-point`: Move the email or thread at point to the trash.
