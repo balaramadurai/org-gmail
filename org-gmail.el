@@ -3,9 +3,9 @@
 ;; Copyright (C) 2025 Bala Ramadurai
 
 ;; Author: Bala Ramadurai <bala@balaramadurai.net>
-;; Version: 0.6
+;; Version: 0.7
 ;; Keywords: org, gmail, email
-;; Package-Requires: ((emacs "25.1") (org-ql "0.6") (hydra "0.13.2"))
+;; Package-Requires: ((emacs "25.1"))
 
 ;;; License:
 
@@ -39,8 +39,6 @@
 
 (require 'subr-x)  ;; Ensure progress-reporter functions are available
 (require 'org)     ;; For org-save-all-org-buffers and org-element-at-point
-(require 'org-ql)
-(require 'hydra)
 
 (defgroup org-gmail nil
   "Settings for the org-gmail package."
@@ -179,7 +177,7 @@
                                                    (message "No label selected."))))
                                              labels))
                          (message "Error: Could not extract label list from script output. Check the %s buffer." (buffer-name proc-buffer))))
-                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer))))))))))))
+                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer)))))))))))))
 
 (defun org-gmail-download-at-point ()
   "Download new messages for the thread at point and insert them after the last known message for that thread."
@@ -322,7 +320,7 @@
                              (goto-char point-to-delete)
                              (org-cut-subtree)))
                          (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-                     (message "Error moving %s to trash. Check the %s buffer." trash-target (buffer-name (process-buffer proc))))))))))))))
+                     (message "Error moving %s to trash. Check the %s buffer." trash-target (buffer-name (process-buffer proc)))))))))))))))
 
 (defun org-gmail-delete-label ()
   "Delete a Gmail label."
@@ -356,22 +354,21 @@
                                        labels))
                    (message "Error fetching labels for deletion. Check %s" (buffer-name proc-buffer))))))))))))
 
-;;; Link Handling
-
-(defun org-gmail-open-link (email-id)
-  "Open the Org entry corresponding to the EMAIL-ID."
-  (let ((results (org-ql-select (org-agenda-files)
-                   `(property "EMAIL_ID" ,email-id)
-                   :action 'markers)))
-    (if (not results)
-        (message "No email found with ID: %s" email-id)
-      (let* ((marker (car results))
-             (buffer (marker-buffer marker))
-             (pos (marker-position marker)))
-        (switch-to-buffer buffer)
-        (goto-char pos)))))
-
-(org-link-set-parameters "org-gmail" :follow #'org-gmail-open-link)
+;;; Link Handling (Optional - requires org-ql)
+;; (defun org-gmail-open-link (email-id)
+;;   "Open the Org entry corresponding to the EMAIL-ID."
+;;   (require 'org-ql)
+;;   (let ((results (org-ql-select (org-agenda-files)
+;;                    `(property "EMAIL_ID" ,email-id)
+;;                    :action 'markers)))
+;;     (if (not results)
+;;         (message "No email found with ID: %s" email-id)
+;;       (let* ((marker (car results))
+;;              (buffer (marker-buffer marker))
+;;              (pos (marker-position marker)))
+;;         (switch-to-buffer buffer)
+;;         (goto-char pos)))))
+;; (org-link-set-parameters "org-gmail" :follow #'org-gmail-open-link)
 
 (defun org-gmail-copy-link-at-point ()
   "Copy an org-gmail: link for the email at point to the kill-ring."
@@ -540,36 +537,7 @@
                      (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
                  (message "Error during bulk move. Check the %s buffer." (buffer-name (process-buffer proc)))))))))))))
 
-;;; Hydra UI
-
-(defhydra org-gmail-hydra (:color blue :hint nil)
-  "
-^Org-Gmail^
-----------------------------------------------------------------
-_d_: Download by label      _e_: Edit label at point     _l_: Copy link
-_D_: Download at point      _b_: Bulk move labels          _L_: Insert link
-_s_: Sync labels            _c_: Create label              _x_: Delete label
-_S_: Sync email IDs         _t_: Trash at point
-_q_: Quit
-"
-  ("d" org-gmail-download-by-label)
-  ("D" org-gmail-download-at-point)
-  ("s" org-gmail-sync-labels)
-  ("S" org-gmail-sync-email-ids)
-  ("e" org-gmail-edit-label-at-point)
-  ("b" org-gmail-bulk-move-labels)
-  ("c" org-gmail-create-label)
-  ("x" org-gmail-delete-label)
-  ("t" org-gmail-trash-at-point)
-  ("l" org-gmail-copy-link-at-point)
-  ("L" org-gmail-insert-link)
-  ("q" nil "quit"))
-
-(defun org-gmail-hydra ()
-  "Show the org-gmail hydra menu."
-  (interactive)
-  (org-gmail-hydra/body))
-
 (provide 'org-gmail)
 
 ;;; org-gmail.el ends here
+

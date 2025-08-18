@@ -15,8 +15,11 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
 - Sync and find duplicate email IDs across your agenda files.
-- Create and insert internal links (`org-gmail:`) between email entries. (in progress)
-- A Hydra menu for quick access to all commands.
+
+* Optional Features (with suggested configuration)
+
+- Create and insert internal links (`org-gmail:`) between email entries (requires `org-ql`).
+- A Hydra menu for quick access to all commands (requires `hydra`).
 
 * Installation
 
@@ -55,8 +58,7 @@ This package is designed to be installed with `straight.el`. Add the following t
                org-gmail-copy-link-at-point
                org-gmail-insert-link
                org-gmail-edit-label-at-point
-               org-gmail-bulk-move-labels
-               org-gmail-hydra)
+               org-gmail-bulk-move-labels)
     :config
     (setq org-gmail-org-file "~/Documents/0Inbox/index.org")
     (setq org-gmail-credentials-file "~/path/to/your/credentials.json")
@@ -68,9 +70,7 @@ This package is designed to be installed with `straight.el`. Add the following t
 
 * Usage
 
-You can call the functions individually or use the Hydra menu for quick access.
-
-- `M-x org-gmail-hydra`: Show the Hydra menu with single-key shortcuts.
+You can call the functions individually or use the optional Hydra menu for quick access.
 
 ** Main Commands:
 - `M-x org-gmail-create-label`: Create a new label in Gmail.
@@ -86,6 +86,67 @@ You can call the functions individually or use the Hydra menu for quick access.
 ** Link Commands:
 - `M-x org-gmail-copy-link-at-point`: Copies a `org-gmail:` link for the email at point.
 - `M-x org-gmail-insert-link`: Inserts a `org-gmail:` link to an email you select from a list.
+
+* Suggested Configuration (Optional)
+
+If you have the `hydra` and `org-ql` packages installed, you can add the following to your configuration for an enhanced experience.
+
+** Hydra Menu
+
+This provides a convenient pop-up menu with single-key shortcuts for all `org-gmail` commands.
+
+#+BEGIN_SRC emacs-lisp
+(use-package hydra)
+(defhydra org-gmail-hydra (:color blue :hint nil)
+  "
+^Org-Gmail^
+----------------------------------------------------------------
+_d_: Download by label      _e_: Edit label at point     _l_: Copy link
+_D_: Download at point      _b_: Bulk move labels          _L_: Insert link
+_s_: Sync labels            _c_: Create label              _x_: Delete label
+_S_: Sync email IDs         _t_: Trash at point
+_q_: Quit
+"
+  ("d" org-gmail-download-by-label)
+  ("D" org-gmail-download-at-point)
+  ("s" org-gmail-sync-labels)
+  ("S" org-gmail-sync-email-ids)
+  ("e" org-gmail-edit-label-at-point)
+  ("b" org-gmail-bulk-move-labels)
+  ("c" org-gmail-create-label)
+  ("x" org-gmail-delete-label)
+  ("t" org-gmail-trash-at-point)
+  ("l" org-gmail-copy-link-at-point)
+  ("L" org-gmail-insert-link)
+  ("q" nil "quit"))
+
+(defun org-gmail-hydra ()
+  "Show the org-gmail hydra menu."
+  (interactive)
+  (org-gmail-hydra/body))
+#+END_SRC
+
+** Custom Links
+
+This enables `org-gmail:` links, allowing you to jump directly to an email entry from anywhere in your Org files.
+
+#+BEGIN_SRC emacs-lisp
+(use-package org-ql
+  :config
+  (defun org-gmail-open-link (email-id)
+    "Open the Org entry corresponding to the EMAIL-ID."
+    (let ((results (org-ql-select (org-agenda-files)
+                     `(property "EMAIL_ID" ,email-id)
+                     :action 'markers)))
+      (if (not results)
+          (message "No email found with ID: %s" email-id)
+        (let* ((marker (car results))
+               (buffer (marker-buffer marker))
+               (pos (marker-position marker)))
+          (switch-to-buffer buffer)
+          (goto-char pos)))))
+  (org-link-set-parameters "org-gmail" :follow #'org-gmail-open-link))
+#+END_SRC
 
 * Use Cases
 
@@ -105,7 +166,7 @@ You can call the functions individually or use the Hydra menu for quick access.
 
 The P.A.R.A. (Projects, Areas, Resources, Archives) method is also well-supported.
 
--  Labeling :: In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
+- Labeling :: In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
 - Download :: Use `M-x org-gmail-download-by-label` to download emails related to a specific project or area.
 - Lifecycle Management :: When a project is finished, use `M-x org-gmail-bulk-move-labels` to move all threads from `1Projects/ClientWebsite` to `4Archives/2025/ClientWebsite`. This automatically updates both Gmail and all the `:LABEL:` properties in your Org files, keeping everything in sync.
 
@@ -119,6 +180,7 @@ These are powerful, full-featured email clients inside Emacs. They are designed 
 
 `org-gmail` is not a replacement for a full mail client. Instead, it's a tool for *integrating* your most important emails into your Org Mode knowledge base.
 
--   Focus ::  `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
+-   Focus :: `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
 -   Workflow :: The intended workflow is to do your initial email triage in the Gmail web interface (or another client) and then use `org-gmail` to pull in the threads that are relevant to your projects and long-term notes.
 -   Strength :: Its strength is its deep integration with Org Mode's structure and linking capabilities, not in managing your day-to-day email flow.
+
