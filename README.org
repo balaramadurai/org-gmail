@@ -15,7 +15,7 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
 - Sync and find duplicate email IDs across your agenda files.
-- Create and insert internal links (`org-gmail:`) between email entries.
+- Create and insert internal links (`org-gmail:`) between email entries. (in progress)
 - A Hydra menu for quick access to all commands.
 
 * Installation
@@ -93,9 +93,9 @@ You can call the functions individually or use the Hydra menu for quick access.
 
 `org-gmail` is a great fit for a GTD workflow. You can process your Gmail inbox and convert actionable emails into Org Mode tasks.
 
-1.  **Process Inbox:** In Gmail, apply a label like `ToProcess` to emails that require action.
-2.  **Download:** Use `M-x org-gmail-download-by-label` to pull all emails with the `ToProcess` label into your `index.org` file.
-3.  **Refile:** Go through the new entries in your inbox file. For each one, you can:
+- Process Inbox :: In Gmail, apply a label like `ToProcess` to emails that require action.
+- Download :: Use `M-x org-gmail-download-by-label` to pull all emails with the `ToProcess` label into your `index.org` file.
+- Refile :: Go through the new entries in your inbox file. For each one, you can:
     -   Add a `TODO` keyword.
     -   Schedule it or set a deadline.
     -   Refile it to the appropriate project file.
@@ -105,9 +105,9 @@ You can call the functions individually or use the Hydra menu for quick access.
 
 The P.A.R.A. (Projects, Areas, Resources, Archives) method is also well-supported.
 
-1.  **Labeling:** In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
-2.  **Download:** Use `M-x org-gmail-download-by-label` to download emails related to a specific project or area.
-3.  **Lifecycle Management:** When a project is finished, use `M-x org-gmail-bulk-move-labels` to move all threads from `1Projects/ClientWebsite` to `4Archives/2025/ClientWebsite`. This automatically updates both Gmail and all the `:LABEL:` properties in your Org files, keeping everything in sync.
+-  Labeling :: In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
+- Download :: Use `M-x org-gmail-download-by-label` to download emails related to a specific project or area.
+- Lifecycle Management :: When a project is finished, use `M-x org-gmail-bulk-move-labels` to move all threads from `1Projects/ClientWebsite` to `4Archives/2025/ClientWebsite`. This automatically updates both Gmail and all the `:LABEL:` properties in your Org files, keeping everything in sync.
 
 * Comparison with Other Emacs Mail Clients
 
@@ -119,6 +119,6 @@ These are powerful, full-featured email clients inside Emacs. They are designed 
 
 `org-gmail` is not a replacement for a full mail client. Instead, it's a tool for *integrating* your most important emails into your Org Mode knowledge base.
 
--   **Focus:** `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
--   **Workflow:** The intended workflow is to do your initial email triage in the Gmail web interface (or another client) and then use `org-gmail` to pull in the threads that are relevant to your projects and long-term notes.
--   **Strength:** Its strength is its deep integration with Org Mode's structure and linking capabilities, not in managing your day-to-day email flow.
+-   Focus ::  `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
+-   Workflow :: The intended workflow is to do your initial email triage in the Gmail web interface (or another client) and then use `org-gmail` to pull in the threads that are relevant to your projects and long-term notes.
+-   Strength :: Its strength is its deep integration with Org Mode's structure and linking capabilities, not in managing your day-to-day email flow.
