@@ -79,7 +79,7 @@ def modify_thread_labels(service, thread_id, old_label_name, new_label_name):
         sys.exit(1)
 
 def bulk_move_labels(service, old_label_name, new_label_name):
-    """Moves all threads from an old label to a new one."""
+    """Moves all threads from an old label to a new one, creating the new label if it doesn't exist."""
     print(f"Starting bulk move from '{old_label_name}' to '{new_label_name}'.", file=sys.stderr)
     
     label_map = get_label_id_map(service)
@@ -89,22 +89,32 @@ def bulk_move_labels(service, old_label_name, new_label_name):
     if not old_label_id:
         print(f"Error: Old label '{old_label_name}' not found in Gmail.", file=sys.stderr)
         sys.exit(1)
+    
     if not new_label_id:
-        print(f"Error: New label '{new_label_name}' not found in Gmail. Please create it first.", file=sys.stderr)
-        sys.exit(1)
+        print(f"New label '{new_label_name}' not found. Creating it now...", file=sys.stderr)
+        create_label(service, new_label_name)
+        # Refresh the label map to get the new ID
+        label_map = get_label_id_map(service)
+        new_label_id = label_map.get(new_label_name)
+        if not new_label_id:
+            print(f"Error: Failed to create or find new label '{new_label_name}' after creation attempt.", file=sys.stderr)
+            sys.exit(1)
 
-    query = f'label:"{old_label_name}"'
-    threads_to_move = list_messages(service, query=query)
-
-    if not threads_to_move:
+    query = f'label:"{normalize_label(old_label_name)}"'
+    threads_to_move_stubs = list_messages(service, query=query)
+    
+    if not threads_to_move_stubs:
         print(f"No threads found with label '{old_label_name}'.", file=sys.stderr)
         return
 
-    print(f"Found {len(threads_to_move)} threads to move.", file=sys.stderr)
+    # The list_messages function for labels returns message stubs, not thread stubs.
+    # We need to get unique thread IDs.
+    thread_ids_to_move = sorted(list({stub['threadId'] for stub in threads_to_move_stubs}))
+
+    print(f"Found {len(thread_ids_to_move)} threads to move.", file=sys.stderr)
     
-    for i, thread_stub in enumerate(threads_to_move):
-        thread_id = thread_stub['threadId']
-        print(f"Moving thread {i+1}/{len(threads_to_move)} (ID: {thread_id})...", file=sys.stderr)
+    for i, thread_id in enumerate(thread_ids_to_move):
+        print(f"Moving thread {i+1}/{len(thread_ids_to_move)} (ID: {thread_id})...", file=sys.stderr)
         modify_thread_labels(service, thread_id, old_label_name, new_label_name)
         time.sleep(0.1) # Small delay to avoid hitting API rate limits
     
@@ -126,6 +136,20 @@ def create_label(service, label_name):
             print(f"Error: A label with this name ('{label_name}') already exists.", file=sys.stderr)
         else:
             print(f'An error occurred while creating the label: {error}', file=sys.stderr)
+        sys.exit(1)
+
+def delete_label(service, label_name):
+    """Deletes a label from the user's account."""
+    try:
+        label_map = get_label_id_map(service)
+        label_id = label_map.get(label_name)
+        if not label_id:
+            print(f"Error: Label '{label_name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        service.users().labels().delete(userId='me', id=label_id).execute()
+        print(f"Label '{label_name}' deleted successfully.", file=sys.stderr)
+    except HttpError as error:
+        print(f'An error occurred while deleting the label: {error}', file=sys.stderr)
         sys.exit(1)
 
 def list_labels(service):
@@ -592,6 +616,7 @@ if __name__ == '__main__':
     parser.add_argument('--delete-thread', help="Gmail thread ID to delete (trash).")
     parser.add_argument('--list-labels', action='store_true', help="List all user-created Gmail labels.")
     parser.add_argument('--create-label', help="Create a new Gmail label.")
+    parser.add_argument('--delete-label', help="Delete a Gmail label.")
     parser.add_argument('--modify-thread-labels', nargs=3, metavar=('THREAD_ID', 'OLD_LABEL', 'NEW_LABEL'), help="Move a thread from an old label to a new one.")
     parser.add_argument('--bulk-move-labels', nargs=2, metavar=('OLD_LABEL', 'NEW_LABEL'), help="Move all threads from an old label to a new one.")
     
@@ -604,6 +629,9 @@ if __name__ == '__main__':
     elif args.create_label:
         service = get_gmail_service(args.credentials)
         create_label(service, args.create_label)
+    elif args.delete_label:
+        service = get_gmail_service(args.credentials)
+        delete_label(service, args.delete_label)
     elif args.delete_message:
         main(delete_message_id=args.delete_message, credentials=args.credentials)
     elif args.delete_thread:

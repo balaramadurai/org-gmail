@@ -6,11 +6,11 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 
 * Features
 
-- Create new labels in Gmail.
+- Create and delete labels in Gmail.
 - Download all emails with a specific label, chosen from a list fetched directly from Gmail.
 - Sync all previously downloaded labels to fetch new emails. This works by finding all `:LABEL:` properties in your agenda files, so you can refile and reorganize your emails without breaking the sync.
-- Update a thread's label in Gmail to match a change you've made in your Org file.
-- Bulk move all threads from one label to another, in both Gmail and your Org files.
+- Edit a thread's label at point, updating it in Gmail and across all your Org files.
+- Bulk move all threads from one label to another. If the destination label doesn't exist, it will be created for you. This updates both Gmail and all corresponding `:LABEL:` properties in your Org files.
 - Download new messages for a specific thread.
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
@@ -46,6 +46,7 @@ This package is designed to be installed with `straight.el`. Add the following t
   (use-package org-gmail
     :straight (org-gmail :type git :host github :repo "balaramadurai/org-gmail")
     :commands (org-gmail-create-label
+               org-gmail-delete-label
                org-gmail-download-by-label
                org-gmail-download-at-point
                org-gmail-sync-labels
@@ -53,7 +54,7 @@ This package is designed to be installed with `straight.el`. Add the following t
                org-gmail-trash-at-point
                org-gmail-copy-link-at-point
                org-gmail-insert-link
-               org-gmail-update-label-at-point
+               org-gmail-edit-label-at-point
                org-gmail-bulk-move-labels
                org-gmail-hydra)
     :config
@@ -73,9 +74,10 @@ You can call the functions individually or use the Hydra menu for quick access.
 
 ** Main Commands:
 - `M-x org-gmail-create-label`: Create a new label in Gmail.
+- `M-x org-gmail-delete-label`: Delete a label from Gmail.
 - `M-x org-gmail-download-by-label`: Fetches a list of your Gmail labels and prompts you to select one to download.
 - `M-x org-gmail-sync-labels`: Finds all labels you have previously downloaded (by looking for `:LABEL:` properties) and fetches new emails for them.
-- `M-x org-gmail-update-label-at-point`: If you've manually changed a `:LABEL:` property, this command syncs that change to Gmail.
+- `M-x org-gmail-edit-label-at-point`: Move the thread at point to a new label by editing the current label name.
 - `M-x org-gmail-bulk-move-labels`: Move all threads from one label to another.
 - `M-x org-gmail-download-at-point`: Download new messages for the thread at point.
 - `M-x org-gmail-sync-email-ids`: Sync and find duplicate email IDs.
