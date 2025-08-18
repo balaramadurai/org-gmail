@@ -86,3 +86,39 @@ You can call the functions individually or use the Hydra menu for quick access.
 ** Link Commands:
 - `M-x org-gmail-copy-link-at-point`: Copies a `org-gmail:` link for the email at point.
 - `M-x org-gmail-insert-link`: Inserts a `org-gmail:` link to an email you select from a list.
+
+* Use Cases
+
+** Getting Things Done (GTD)
+
+`org-gmail` is a great fit for a GTD workflow. You can process your Gmail inbox and convert actionable emails into Org Mode tasks.
+
+1.  **Process Inbox:** In Gmail, apply a label like `ToProcess` to emails that require action.
+2.  **Download:** Use `M-x org-gmail-download-by-label` to pull all emails with the `ToProcess` label into your `index.org` file.
+3.  **Refile:** Go through the new entries in your inbox file. For each one, you can:
+    -   Add a `TODO` keyword.
+    -   Schedule it or set a deadline.
+    -   Refile it to the appropriate project file.
+    -   Use `M-x org-gmail-edit-label-at-point` to change the label in Gmail (e.g., to `Reference` or `Projects/ProjectName`).
+
+** P.A.R.A. Method
+
+The P.A.R.A. (Projects, Areas, Resources, Archives) method is also well-supported.
+
+1.  **Labeling:** In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
+2.  **Download:** Use `M-x org-gmail-download-by-label` to download emails related to a specific project or area.
+3.  **Lifecycle Management:** When a project is finished, use `M-x org-gmail-bulk-move-labels` to move all threads from `1Projects/ClientWebsite` to `4Archives/2025/ClientWebsite`. This automatically updates both Gmail and all the `:LABEL:` properties in your Org files, keeping everything in sync.
+
+* Comparison with Other Emacs Mail Clients
+
+** Gnus, mu4e, notmuch
+
+These are powerful, full-featured email clients inside Emacs. They are designed to manage your entire email workflow: reading, writing, sending, and organizing.
+
+** org-gmail
+
+`org-gmail` is not a replacement for a full mail client. Instead, it's a tool for *integrating* your most important emails into your Org Mode knowledge base.
+
+-   **Focus:** `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
+-   **Workflow:** The intended workflow is to do your initial email triage in the Gmail web interface (or another client) and then use `org-gmail` to pull in the threads that are relevant to your projects and long-term notes.
+-   **Strength:** Its strength is its deep integration with Org Mode's structure and linking capabilities, not in managing your day-to-day email flow.
