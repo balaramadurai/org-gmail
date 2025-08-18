@@ -3,9 +3,9 @@
 ;; Copyright (C) 2025 Bala Ramadurai
 
 ;; Author: Bala Ramadurai <bala@balaramadurai.net>
-;; Version: 0.1
+;; Version: 0.4
 ;; Keywords: org, gmail, email
-;; Package-Requires: ((emacs "25.1"))
+;; Package-Requires: ((emacs "25.1") (org-ql "0.6") (hydra "0.13.2"))
 
 ;;; License:
 
@@ -39,6 +39,8 @@
 
 (require 'subr-x)  ;; Ensure progress-reporter functions are available
 (require 'org)     ;; For org-save-all-org-buffers and org-element-at-point
+(require 'org-ql)
+(require 'hydra)
 
 (defgroup org-gmail nil
   "Settings for the org-gmail package."
@@ -90,6 +92,9 @@
         (set-process-sentinel
          process
          (lambda (proc event)
+           (with-current-buffer (process-buffer proc)
+             (when-let ((window (get-buffer-window (process-buffer proc))))
+               (set-window-point window (point-max))))
            (when (eq (process-status proc) 'exit)
              (if progress-reporter
                  (progress-reporter-done progress-reporter)
@@ -98,7 +103,6 @@
                (if (zerop (process-exit-status proc))
                    (progn
                      (message "Finished downloading successfully.")
-                     ;; Automatically close the sync buffer on success after 2 seconds
                      (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
                  (message "Error downloading emails. Check the %s buffer." (buffer-name (process-buffer proc))))))))
         (set-process-query-on-exit-flag process nil)
@@ -113,6 +117,26 @@
                                    " seconds\n"))
                          (message "Gmail sync timed out"))))
         (when progress-reporter (progress-reporter-update progress-reporter 50)))))))
+
+(defun org-gmail-create-label ()
+  "Create a new Gmail label."
+  (interactive)
+  (let ((label-name (read-string "Enter new label name: ")))
+    (when (not (string-empty-p label-name))
+      (let* ((command-args (list "--create-label" label-name)))
+        (org-gmail--run-sync-process command-args "*Gmail Create Label*")))))
+
+(defun org-gmail--extract-labels-from-output (output)
+  "Extract the list of labels from the script's output string."
+  (let* ((start-marker "---LABEL_LIST_START---")
+         (end-marker "---LABEL_LIST_END---")
+         (start-pos (string-match (regexp-quote start-marker) output))
+         (end-pos (string-match (regexp-quote end-marker) output)))
+    (when (and start-pos end-pos)
+      (let* ((labels-str (string-trim (substring output
+                                                 (+ start-pos (length start-marker))
+                                                 end-pos))))
+        (split-string labels-str "\n" t)))))
 
 (defun org-gmail-download-by-label ()
   "Asynchronously fetch Gmail labels, then prompt the user to select one for download."
@@ -132,20 +156,16 @@
         (set-process-sentinel
          process
          (lambda (proc event)
+           (with-current-buffer (process-buffer proc)
+             (when-let ((window (get-buffer-window (process-buffer proc))))
+               (set-window-point window (point-max))))
            (when (eq (process-status proc) 'exit)
              (let ((proc-buffer (process-buffer proc)))
                (with-current-buffer proc-buffer
                  (if (zerop (process-exit-status proc))
-                     (let* ((full-output (buffer-string))
-                            (start-marker "---LABEL_LIST_START---")
-                            (end-marker "---LABEL_LIST_END---")
-                            (start-pos (string-match (regexp-quote start-marker) full-output))
-                            (end-pos (string-match (regexp-quote end-marker) full-output)))
-                       (if (and start-pos end-pos)
-                           (let* ((labels-str (string-trim (substring full-output
-                                                                      (+ start-pos (length start-marker))
-                                                                      end-pos)))
-                                  (labels (split-string labels-str "\n" t)))
+                     (let* ((labels (org-gmail--extract-labels-from-output (buffer-string))))
+                       (if labels
+                           (progn
                              (kill-buffer proc-buffer) ; Kill the fetch buffer before prompting
                              (run-with-timer 0 nil
                                              (lambda (labels-list)
@@ -203,6 +223,9 @@
                   (set-process-sentinel
                    process
                    (lambda (proc event)
+                     (with-current-buffer (process-buffer proc)
+                       (when-let ((window (get-buffer-window (process-buffer proc))))
+                         (set-window-point window (point-max))))
                      (when (eq (process-status proc) 'exit)
                        (with-current-buffer (process-buffer proc)
                          (if (zerop (process-exit-status proc))
@@ -230,6 +253,15 @@
             (message "Could not find existing entries for thread %s in the current buffer. Cannot insert." thread-id)))
       (message "No THREAD_ID property found at or above point."))))
 
+(defun org-gmail-sync-labels ()
+  "Sync all previously downloaded labels, fetching new emails."
+  (interactive)
+  (org-save-all-org-buffers)
+  (let* ((command-args (list "--sync-labels"
+                             "--org-file" org-gmail-org-file
+                             "--date-drawer" org-gmail-date-drawer
+                             "--agenda-files" (mapconcat #'identity org-agenda-files ","))))
+    (org-gmail--run-sync-process command-args "*Gmail Sync Labels*")))
 
 (defun org-gmail-sync-email-ids (&optional consolidate)
   "Sync and find duplicate EMAIL_IDs across all agenda files."
@@ -277,6 +309,9 @@
             (set-process-sentinel
              process
              (lambda (proc event)
+               (with-current-buffer (process-buffer proc)
+                 (when-let ((window (get-buffer-window (process-buffer proc))))
+                   (set-window-point window (point-max))))
                (when (eq (process-status proc) 'exit)
                  (with-current-buffer (process-buffer proc)
                    (if (zerop (process-exit-status proc))
@@ -288,6 +323,175 @@
                              (org-cut-subtree)))
                          (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
                      (message "Error moving %s to trash. Check the %s buffer." trash-target (buffer-name (process-buffer proc))))))))))))))
+
+;;; Link Handling
+
+(defun org-gmail-open-link (email-id)
+  "Open the Org entry corresponding to the EMAIL-ID."
+  (let ((results (org-ql-select (org-agenda-files)
+                   `(property "EMAIL_ID" ,email-id)
+                   :action 'markers)))
+    (if (not results)
+        (message "No email found with ID: %s" email-id)
+      (let* ((marker (car results))
+             (buffer (marker-buffer marker))
+             (pos (marker-position marker)))
+        (switch-to-buffer buffer)
+        (goto-char pos)))))
+
+(org-link-set-parameters "org-gmail" :follow #'org-gmail-open-link)
+
+(defun org-gmail-copy-link-at-point ()
+  "Copy an org-gmail: link for the email at point to the kill-ring."
+  (interactive)
+  (let ((email-id (save-excursion
+                    (org-back-to-heading t)
+                    (org-entry-get (point) "EMAIL_ID"))))
+    (if email-id
+        (progn
+          (kill-new (format "[[org-gmail:%s]]" email-id))
+          (message "Copied org-gmail link for ID: %s" email-id))
+      (message "No EMAIL_ID property found at point."))))
+
+(defun org-gmail--get-all-emails-for-completion ()
+  "Return a list of all emails in agenda files for completion."
+  (let ((emails '()))
+    (dolist (file (org-agenda-files))
+      (with-current-buffer (find-file-noselect file)
+        (org-element-map (org-element-parse-buffer) 'headline
+          (lambda (hl)
+            (let* ((props (org-element-property :properties hl))
+                   (email-id (cdr (assoc "EMAIL_ID" props)))
+                   (subject (cdr (assoc "SUBJECT" props)))
+                   (from (cdr (assoc "FROM" props))))
+              (when email-id
+                (push (cons (format "%s -- from %s" (or subject "No Subject") (or from "Unknown"))
+                            email-id)
+                      emails)))))))
+    emails))
+
+(defun org-gmail-insert-link ()
+  "Insert a link to an email, selected from a list of all emails."
+  (interactive)
+  (let* ((emails (org-gmail--get-all-emails-for-completion))
+         (selection (completing-read "Select email: " (mapcar #'car emails) nil t)))
+    (when selection
+      (let* ((email-id (cdr (assoc selection emails)))
+             (subject (car (split-string selection " -- from " t))))
+        (insert (format "[[org-gmail:%s][%s]]" email-id subject))))))
+
+;;; Label Editing
+
+(defun org-gmail--update-label-property-in-org-files (thread-id new-label)
+  "Find all entries with THREAD-ID and update their LABEL property to NEW-LABEL."
+  (dolist (file (org-agenda-files))
+    (with-current-buffer (find-file-noselect file)
+      (let ((buffer-modified nil))
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward (concat ":THREAD_ID:[ \t]+" (regexp-quote thread-id)) nil t)
+            (save-excursion
+              (org-back-to-heading t)
+              (org-set-property "LABEL" new-label)
+              (setq buffer-modified t))))
+        (when buffer-modified
+          (save-buffer)
+          (message "Updated LABEL in %s" file))))))
+
+(defun org-gmail--modify-thread-label-in-gmail-and-org (thread-id old-label new-label)
+  "Call the python script to modify the label in Gmail, then update Org files."
+  (let* ((command-args (list "--modify-thread-labels" thread-id old-label new-label))
+         (buffer-name "*Gmail Edit Label*")
+         (buffer (get-buffer-create buffer-name))
+         (script-path (expand-file-name org-gmail-python-script))
+         (command (append (list "python3" script-path) command-args
+                          (list "--credentials" (expand-file-name org-gmail-credentials-file)))))
+    (org-gmail--display-sync-buffer buffer)
+    (with-current-buffer buffer (erase-buffer))
+    (let ((process (apply #'start-process "gmail-edit-label" buffer command)))
+      (set-process-sentinel
+       process
+       (lambda (proc event)
+         (when (eq (process-status proc) 'exit)
+           (if (zerop (process-exit-status proc))
+               (progn
+                 (message "Label updated in Gmail. Now updating Org files...")
+                 (org-gmail--update-label-property-in-org-files thread-id new-label)
+                 (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
+             (message "Error updating label in Gmail. Check %s" (buffer-name (process-buffer proc))))))))))
+
+(defun org-gmail-update-label-at-point ()
+  "Update the label in Gmail to match the LABEL property at point."
+  (interactive)
+  (let* ((thread-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "THREAD_ID")))
+         (new-label (save-excursion (org-back-to-heading t) (org-entry-get (point) "LABEL")))
+         (old-label (save-excursion (org-back-to-heading t) (org-entry-get (point) "OLD_LABEL"))))
+    (if (not (and thread-id new-label old-label))
+        (message "No THREAD_ID, LABEL, or OLD_LABEL property found at point. Cannot update.")
+      (when (y-or-n-p (format "Update Gmail label from '%s' to '%s' for this thread?" old-label new-label))
+        (org-gmail--modify-thread-label-in-gmail-and-org thread-id old-label new-label)))))
+
+(defun org-gmail-bulk-move-labels ()
+  "Move all threads from one label to another, in Gmail and in Org files."
+  (interactive)
+  (let* ((buffer-name "*Gmail Label Fetch for Bulk Move*")
+         (buffer (get-buffer-create buffer-name))
+         (script-path (expand-file-name org-gmail-python-script))
+         (command (list "python3" script-path "--list-labels"
+                        "--credentials" (expand-file-name org-gmail-credentials-file))))
+    (org-gmail--display-sync-buffer buffer)
+    (with-current-buffer buffer (erase-buffer) (insert "Fetching labels for bulk move...\n"))
+    (let ((process (apply #'start-process "gmail-labels-bulk-move" buffer command)))
+      (when process
+        (set-process-sentinel
+         process
+         (lambda (proc event)
+           (when (eq (process-status proc) 'exit)
+             (let ((proc-buffer (process-buffer proc)))
+               (with-current-buffer proc-buffer
+                 (if (zerop (process-exit-status proc))
+                     (let* ((labels (org-gmail--extract-labels-from-output (buffer-string))))
+                       (kill-buffer proc-buffer)
+                       (run-with-timer 0 nil
+                                       (lambda (labels-list)
+                                         (let* ((old-label (completing-read "Move all threads FROM label: " labels-list nil t))
+                                                (new-label (completing-read (format "Move all threads TO label: " old-label) labels-list nil t)))
+                                           (if (and (not (string-empty-p old-label))
+                                                    (not (string-empty-p new-label)))
+                                               (let* ((command-args (list "--bulk-move-labels" old-label new-label)))
+                                                 (org-gmail--run-sync-process command-args "*Gmail Bulk Move*"))
+                                             (message "Bulk move cancelled."))))
+                                       labels))
+                   (message "Error fetching labels for bulk move. Check %s" (buffer-name proc-buffer))))))))))))
+
+;;; Hydra UI
+
+(defhydra org-gmail-hydra (:color blue :hint nil)
+  "
+^Org-Gmail^
+----------------------------------------------------------------
+_d_: Download by label      _u_: Update label at point     _l_: Copy link
+_D_: Download at point      _b_: Bulk move labels          _L_: Insert link
+_s_: Sync labels            _c_: Create label
+_S_: Sync email IDs         _t_: Trash at point
+_q_: Quit
+"
+  ("d" org-gmail-download-by-label)
+  ("D" org-gmail-download-at-point)
+  ("s" org-gmail-sync-labels)
+  ("S" org-gmail-sync-email-ids)
+  ("u" org-gmail-update-label-at-point)
+  ("b" org-gmail-bulk-move-labels)
+  ("c" org-gmail-create-label)
+  ("t" org-gmail-trash-at-point)
+  ("l" org-gmail-copy-link-at-point)
+  ("L" org-gmail-insert-link)
+  ("q" nil "quit"))
+
+(defun org-gmail-hydra ()
+  "Show the org-gmail hydra menu."
+  (interactive)
+  (org-gmail-hydra/body))
 
 (provide 'org-gmail)
 
