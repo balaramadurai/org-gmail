@@ -177,7 +177,7 @@
                                                    (message "No label selected."))))
                                              labels))
                          (message "Error: Could not extract label list from script output. Check the %s buffer." (buffer-name proc-buffer))))
-                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer)))))))))))))
+                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer))))))))))))
 
 (defun org-gmail-download-at-point ()
   "Download new messages for the thread at point and insert them after the last known message for that thread."
@@ -320,7 +320,7 @@
                              (goto-char point-to-delete)
                              (org-cut-subtree)))
                          (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-                     (message "Error moving %s to trash. Check the %s buffer." trash-target (buffer-name (process-buffer proc)))))))))))))))
+                     (message "Error moving %s to trash. Check the %s buffer." trash-target (buffer-name (process-buffer proc))))))))))))))
 
 (defun org-gmail-delete-label ()
   "Delete a Gmail label."
