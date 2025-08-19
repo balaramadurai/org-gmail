@@ -511,7 +511,8 @@ def download_and_append_label(service, label_name, org_file, date_drawer, agenda
 def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, thread_id=None, 
          do_sync_email_ids=False, consolidate=False, credentials=None, 
          delete_message_id=None, delete_thread_id=None, sync_labels=False,
-         modify_thread_labels_args=None, bulk_move_labels_args=None):
+         modify_thread_labels_args=None, bulk_move_labels_args=None,
+         ignore_labels=None):
     """Main function to drive the script's logic."""
     print(f"Starting main with: label='{label_name}', thread_id='{thread_id}', sync={do_sync_email_ids}", file=sys.stderr)
     
@@ -531,6 +532,15 @@ def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, th
     if sync_labels:
         labels_to_sync = parse_org_for_labels_from_properties(agenda_files)
         print(f"Found {len(labels_to_sync)} labels to sync from properties: {labels_to_sync}", file=sys.stderr)
+        
+        if ignore_labels:
+            filtered_labels = []
+            for label in labels_to_sync:
+                if not any(re.search(pattern, label) for pattern in ignore_labels):
+                    filtered_labels.append(label)
+            print(f"Ignoring {len(labels_to_sync) - len(filtered_labels)} labels. Syncing {len(filtered_labels)} labels.", file=sys.stderr)
+            labels_to_sync = filtered_labels
+
         for label in labels_to_sync:
             download_and_append_label(service, label, org_file, date_drawer, agenda_files)
         return
@@ -619,6 +629,7 @@ if __name__ == '__main__':
     parser.add_argument('--delete-label', help="Delete a Gmail label.")
     parser.add_argument('--modify-thread-labels', nargs=3, metavar=('THREAD_ID', 'OLD_LABEL', 'NEW_LABEL'), help="Move a thread from an old label to a new one.")
     parser.add_argument('--bulk-move-labels', nargs=2, metavar=('OLD_LABEL', 'NEW_LABEL'), help="Move all threads from an old label to a new one.")
+    parser.add_argument('--ignore-labels', nargs='*', help="A list of regex patterns for labels to ignore during sync.")
     
     args = parser.parse_args()
 
@@ -642,7 +653,7 @@ if __name__ == '__main__':
     elif args.sync_labels:
         if not all([args.org_file, args.date_drawer, args.agenda_files]):
             parser.error("--sync-labels requires --org-file, --date-drawer, and --agenda-files")
-        main(sync_labels=True, org_file=args.org_file, date_drawer=args.date_drawer, agenda_files=args.agenda_files, credentials=args.credentials)
+        main(sync_labels=True, org_file=args.org_file, date_drawer=args.date_drawer, agenda_files=args.agenda_files, credentials=args.credentials, ignore_labels=args.ignore_labels)
     elif args.label:
         if not all([args.org_file, args.date_drawer, args.agenda_files]):
             parser.error("--label requires --org-file, --date-drawer, and --agenda-files")

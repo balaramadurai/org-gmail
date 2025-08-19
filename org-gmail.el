@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Bala Ramadurai
 
 ;; Author: Bala Ramadurai <bala@balaramadurai.net>
-;; Version: 0.7
+;; Version: 0.8
 ;; Keywords: org, gmail, email
 ;; Package-Requires: ((emacs "25.1"))
 
@@ -67,6 +67,11 @@
 (defcustom org-gmail-process-timeout 300
   "Timeout in seconds for Gmail download processes."
   :type 'integer
+  :group 'org-gmail)
+
+(defcustom org-gmail-sync-ignore-labels '("^4Archives/" "^3Resources/")
+  "A list of regexps for labels to ignore during `org-gmail-sync-labels`."
+  :type '(repeat regexp)
   :group 'org-gmail)
 
 (defun org-gmail--display-sync-buffer (buffer)
@@ -255,10 +260,12 @@
   "Sync all previously downloaded labels, fetching new emails."
   (interactive)
   (org-save-all-org-buffers)
-  (let* ((command-args (list "--sync-labels"
-                             "--org-file" org-gmail-org-file
-                             "--date-drawer" org-gmail-date-drawer
-                             "--agenda-files" (mapconcat #'identity org-agenda-files ","))))
+  (let* ((command-args (append (list "--sync-labels"
+                                     "--org-file" org-gmail-org-file
+                                     "--date-drawer" org-gmail-date-drawer
+                                     "--agenda-files" (mapconcat #'identity org-agenda-files ","))
+                               (when org-gmail-sync-ignore-labels
+                                 (cons "--ignore-labels" org-gmail-sync-ignore-labels)))))
     (org-gmail--run-sync-process command-args "*Gmail Sync Labels*")))
 
 (defun org-gmail-sync-email-ids (&optional consolidate)
@@ -353,61 +360,6 @@
                                              (message "Label deletion cancelled."))))
                                        labels))
                    (message "Error fetching labels for deletion. Check %s" (buffer-name proc-buffer))))))))))))
-
-;;; Link Handling (Optional - requires org-ql)
-;; (defun org-gmail-open-link (email-id)
-;;   "Open the Org entry corresponding to the EMAIL-ID."
-;;   (require 'org-ql)
-;;   (let ((results (org-ql-select (org-agenda-files)
-;;                    `(property "EMAIL_ID" ,email-id)
-;;                    :action 'markers)))
-;;     (if (not results)
-;;         (message "No email found with ID: %s" email-id)
-;;       (let* ((marker (car results))
-;;              (buffer (marker-buffer marker))
-;;              (pos (marker-position marker)))
-;;         (switch-to-buffer buffer)
-;;         (goto-char pos)))))
-;; (org-link-set-parameters "org-gmail" :follow #'org-gmail-open-link)
-
-(defun org-gmail-copy-link-at-point ()
-  "Copy an org-gmail: link for the email at point to the kill-ring."
-  (interactive)
-  (let ((email-id (save-excursion
-                    (org-back-to-heading t)
-                    (org-entry-get (point) "EMAIL_ID"))))
-    (if email-id
-        (progn
-          (kill-new (format "[[org-gmail:%s]]" email-id))
-          (message "Copied org-gmail link for ID: %s" email-id))
-      (message "No EMAIL_ID property found at point."))))
-
-(defun org-gmail--get-all-emails-for-completion ()
-  "Return a list of all emails in agenda files for completion."
-  (let ((emails '()))
-    (dolist (file (org-agenda-files))
-      (with-current-buffer (find-file-noselect file)
-        (org-element-map (org-element-parse-buffer) 'headline
-          (lambda (hl)
-            (let* ((props (org-element-property :properties hl))
-                   (email-id (cdr (assoc "EMAIL_ID" props)))
-                   (subject (cdr (assoc "SUBJECT" props)))
-                   (from (cdr (assoc "FROM" props))))
-              (when email-id
-                (push (cons (format "%s -- from %s" (or subject "No Subject") (or from "Unknown"))
-                            email-id)
-                      emails)))))))
-    emails))
-
-(defun org-gmail-insert-link ()
-  "Insert a link to an email, selected from a list of all emails."
-  (interactive)
-  (let* ((emails (org-gmail--get-all-emails-for-completion))
-         (selection (completing-read "Select email: " (mapcar #'car emails) nil t)))
-    (when selection
-      (let* ((email-id (cdr (assoc selection emails)))
-             (subject (car (split-string selection " -- from " t))))
-        (insert (format "[[org-gmail:%s][%s]]" email-id subject))))))
 
 ;;; Label Editing
 
@@ -540,4 +492,3 @@
 (provide 'org-gmail)
 
 ;;; org-gmail.el ends here
-
