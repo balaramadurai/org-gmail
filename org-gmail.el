@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Bala Ramadurai
 
 ;; Author: Bala Ramadurai <bala@balaramadurai.net>
-;; Version: 0.8
+;; Version: 1.2
 ;; Keywords: org, gmail, email
 ;; Package-Requires: ((emacs "25.1"))
 
@@ -360,6 +360,80 @@
                                              (message "Label deletion cancelled."))))
                                        labels))
                    (message "Error fetching labels for deletion. Check %s" (buffer-name proc-buffer))))))))))))
+
+;;; Action Handling
+
+(defun org-gmail-add-action-at-point ()
+  "Add an actionable TODO sub-task under the email entry at point."
+  (interactive)
+  (save-excursion
+    (org-back-to-heading t)
+    (let* ((email-id (org-entry-get (point) "EMAIL_ID"))
+           (level (org-outline-level))
+           (action-text (read-string "Next action: ")))
+      (when (not (string-empty-p action-text))
+        (org-end-of-subtree)
+        (insert (format "\n%s TODO %s\n:PROPERTIES:\n:EMAIL_LINK: [[org-gmail:%s]]\n:END:\n"
+                        (make-string (1+ level) ?*)
+                        action-text
+                        email-id))
+        (message "Action task created for email.")))))
+
+(defun org-gmail-defer-at-point ()
+  "Defer (snooze) the email at point in Gmail."
+  (interactive)
+  (let ((email-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "EMAIL_ID"))))
+    (if (not email-id)
+        (message "No EMAIL_ID property found at point.")
+      (let ((defer-time (completing-read "Snooze until: " '("in 2 hours" "tomorrow at 9am") nil t "tomorrow at 9am")))
+        (when (y-or-n-p (format "Really snooze this email until %s and delete from Org?" defer-time))
+          (let* ((command-args (list "--defer" email-id defer-time)))
+            (org-gmail--run-sync-process command-args "*Gmail Defer*"))
+          (org-cut-subtree))))))
+
+(defun org-gmail--reply-send (email-id reply-buffer)
+  "Send the reply and kill the buffer."
+  (with-current-buffer reply-buffer
+    (let* ((reply-body (buffer-substring-no-properties (point-min) (point-max)))
+           (command-args (list "--reply" email-id reply-body)))
+      (org-gmail--run-sync-process command-args "*Gmail Reply Send*")))
+  (kill-buffer reply-buffer))
+
+(defun org-gmail--reply-cancel (reply-buffer)
+  "Cancel the reply and kill the buffer."
+  (kill-buffer reply-buffer)
+  (message "Reply cancelled."))
+
+(defun org-gmail-reply-at-point ()
+  "Reply to the email at point."
+  (interactive)
+  (let ((email-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "EMAIL_ID"))))
+    (if (not email-id)
+        (message "No EMAIL_ID property found at point.")
+      (let ((reply-buffer (get-buffer-create "*Gmail Reply*")))
+        (with-current-buffer reply-buffer
+          (erase-buffer)
+          (insert ";; Enter your reply below. C-c C-c to send, C-c C-k to cancel.\n\n")
+          (let ((map (make-keymap)))
+            (set-keymap-parent map (make-sparse-keymap))
+            (define-key map (kbd "C-c C-c")
+              `(lambda () (interactive) (org-gmail--reply-send ,email-id ,reply-buffer)))
+            (define-key map (kbd "C-c C-k")
+              `(lambda () (interactive) (org-gmail--reply-cancel ,reply-buffer)))
+            (use-local-map map)))
+        (switch-to-buffer-other-window reply-buffer)))))
+
+(defun org-gmail-delegate-at-point ()
+  "Delegate (forward) the email at point."
+  (interactive)
+  (let ((email-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "EMAIL_ID"))))
+    (if (not email-id)
+        (message "No EMAIL_ID property found at point.")
+      (let* ((recipient (read-string "Delegate to (email): "))
+             (note (read-string "Add a note: ")))
+        (when (and (not (string-empty-p recipient)) (y-or-n-p (format "Delegate this email to %s?" recipient)))
+          (let* ((command-args (list "--delegate" email-id recipient note)))
+            (org-gmail--run-sync-process command-args "*Gmail Delegate*")))))))
 
 ;;; Label Editing
 

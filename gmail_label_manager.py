@@ -5,6 +5,10 @@ import pickle
 import re
 import sys
 import time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from email import policy
 from email.parser import BytesParser
 from googleapiclient.discovery import build
@@ -13,7 +17,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 from collections import defaultdict
 import html2text
-from datetime import datetime
+from datetime import datetime, timedelta
 import email.utils
 import pytz
 try:
@@ -187,6 +191,75 @@ def delete_thread(service, thread_id):
     except HttpError as error:
         print(f'An error occurred while deleting thread: {error}', file=sys.stderr)
         sys.exit(1)
+
+def defer_message(service, msg_id, defer_time_str):
+    """Snoozes a message until a specific time."""
+    try:
+        # A more robust time parsing could be added here
+        if "tomorrow" in defer_time_str:
+            defer_until = datetime.now(pytz.utc) + timedelta(days=1)
+            if "9am" in defer_time_str:
+                defer_until = defer_until.replace(hour=9, minute=0, second=0, microsecond=0)
+        elif "in 2 hours" in defer_time_str:
+            defer_until = datetime.now(pytz.utc) + timedelta(hours=2)
+        else:
+            # Default to tomorrow morning
+            defer_until = (datetime.now(pytz.utc) + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+        snooze_request = {
+            'snoozeUntil': defer_until.isoformat()
+        }
+        service.users().messages().snooze(userId='me', id=msg_id, body=snooze_request).execute()
+        print(f"Message {msg_id} snoozed until {defer_until.strftime('%Y-%m-%d %H:%M:%S %Z')}", file=sys.stderr)
+    except HttpError as error:
+        print(f'An error occurred while snoozing the message: {error}', file=sys.stderr)
+        sys.exit(1)
+
+def reply_to_message(service, msg_id, message_body):
+    """Sends a reply to a specific message."""
+    try:
+        original_message = service.users().messages().get(userId='me', id=msg_id, format='metadata', metadataHeaders=['subject', 'from', 'to', 'cc', 'message-id', 'references']).execute()
+        headers = {h['name'].lower(): h['value'] for h in original_message['payload']['headers']}
+        
+        reply = MIMEText(message_body)
+        reply['to'] = headers['from']
+        reply['subject'] = "Re: " + headers['subject']
+        reply['In-Reply-To'] = headers['message-id']
+        reply['References'] = headers.get('references', '') + ' ' + headers['message-id']
+
+        raw_message = base64.urlsafe_b64encode(reply.as_bytes()).decode()
+        body = {'raw': raw_message, 'threadId': original_message['threadId']}
+        
+        service.users().messages().send(userId='me', body=body).execute()
+        print(f"Reply sent for message ID: {msg_id}", file=sys.stderr)
+    except HttpError as error:
+        print(f'An error occurred while sending the reply: {error}', file=sys.stderr)
+        sys.exit(1)
+
+def delegate_message(service, msg_id, recipient, note):
+    """Forwards a message to a recipient with a note."""
+    try:
+        original_message_raw = service.users().messages().get(userId='me', id=msg_id, format='raw').execute()
+        raw_data = base64.urlsafe_b64decode(original_message_raw['raw'])
+        original_email = BytesParser(policy=policy.default).parsebytes(raw_data)
+
+        forward = MIMEMultipart()
+        forward['to'] = recipient
+        forward['from'] = original_email['to'] # Assuming 'to' is your address
+        forward['subject'] = "Fwd: " + original_email['subject']
+        
+        forward.attach(MIMEText(note + "\n\n" + "---------- Forwarded message ----------\n"))
+        forward.attach(original_email)
+
+        raw_message = base64.urlsafe_b64encode(forward.as_bytes()).decode()
+        body = {'raw': raw_message, 'threadId': original_message_raw['threadId']}
+        
+        service.users().messages().send(userId='me', body=body).execute()
+        print(f"Message {msg_id} delegated to {recipient}", file=sys.stderr)
+    except HttpError as error:
+        print(f'An error occurred while delegating the message: {error}', file=sys.stderr)
+        sys.exit(1)
+
 
 def normalize_label(label_name):
     """Normalizes a Gmail label name to be used in a query."""
@@ -512,12 +585,27 @@ def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, th
          do_sync_email_ids=False, consolidate=False, credentials=None, 
          delete_message_id=None, delete_thread_id=None, sync_labels=False,
          modify_thread_labels_args=None, bulk_move_labels_args=None,
-         ignore_labels=None):
+         ignore_labels=None, defer_args=None, reply_args=None, delegate_args=None):
     """Main function to drive the script's logic."""
     print(f"Starting main with: label='{label_name}', thread_id='{thread_id}', sync={do_sync_email_ids}", file=sys.stderr)
     
     service = get_gmail_service(credentials)
     print("Gmail service initialized successfully.", file=sys.stderr)
+
+    if defer_args:
+        msg_id, defer_time = defer_args
+        defer_message(service, msg_id, defer_time)
+        return
+    
+    if reply_args:
+        msg_id, message_body = reply_args
+        reply_to_message(service, msg_id, message_body)
+        return
+
+    if delegate_args:
+        msg_id, recipient, note = delegate_args
+        delegate_message(service, msg_id, recipient, note)
+        return
 
     if bulk_move_labels_args:
         old_label, new_label = bulk_move_labels_args
@@ -630,6 +718,9 @@ if __name__ == '__main__':
     parser.add_argument('--modify-thread-labels', nargs=3, metavar=('THREAD_ID', 'OLD_LABEL', 'NEW_LABEL'), help="Move a thread from an old label to a new one.")
     parser.add_argument('--bulk-move-labels', nargs=2, metavar=('OLD_LABEL', 'NEW_LABEL'), help="Move all threads from an old label to a new one.")
     parser.add_argument('--ignore-labels', nargs='*', help="A list of regex patterns for labels to ignore during sync.")
+    parser.add_argument('--defer', nargs=2, metavar=('MSG_ID', 'TIME'), help="Snooze a message.")
+    parser.add_argument('--reply', nargs=2, metavar=('MSG_ID', 'BODY'), help="Reply to a message.")
+    parser.add_argument('--delegate', nargs=3, metavar=('MSG_ID', 'RECIPIENT', 'NOTE'), help="Forward a message.")
     
     args = parser.parse_args()
 
@@ -666,5 +757,11 @@ if __name__ == '__main__':
         main(modify_thread_labels_args=args.modify_thread_labels, credentials=args.credentials)
     elif args.bulk_move_labels:
         main(bulk_move_labels_args=args.bulk_move_labels, credentials=args.credentials)
+    elif args.defer:
+        main(defer_args=args.defer, credentials=args.credentials)
+    elif args.reply:
+        main(reply_args=args.reply, credentials=args.credentials)
+    elif args.delegate:
+        main(delegate_args=args.delegate, credentials=args.credentials)
     else:
         parser.error("You must provide a command.")

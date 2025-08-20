@@ -14,11 +14,13 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 - Download new messages for a specific thread.
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
-- Sync and find duplicate email IDs across your agenda files.
-  
+- Defer (snooze) emails in Gmail.
+- Reply to and delegate (forward) emails directly from Emacs.
+- Create actionable sub-tasks for emails that will appear in your agenda.
+
 * Optional Features (with suggested configuration)
 
-- Create and insert internal links (`org-gmail:`) between email entries (requires `org-ql`). (in progress)
+- Create and insert internal links (`org-gmail:`) between email entries (requires `org-ql`).
 - A Hydra menu for quick access to all commands (requires `hydra`).
 
 * Installation
@@ -55,10 +57,14 @@ This package is designed to be installed with `straight.el`. Add the following t
                org-gmail-sync-labels
                org-gmail-sync-email-ids
                org-gmail-trash-at-point
+               org-gmail-defer-at-point
+               org-gmail-reply-at-point
+               org-gmail-delegate-at-point
                org-gmail-copy-link-at-point
                org-gmail-insert-link
                org-gmail-edit-label-at-point
-               org-gmail-bulk-move-labels)
+               org-gmail-bulk-move-labels
+               org-gmail-add-action-at-point)
     :config
     (setq org-gmail-org-file "~/Documents/0Inbox/index.org")
     (setq org-gmail-credentials-file "~/path/to/your/credentials.json")
@@ -84,6 +90,10 @@ You can call the functions individually or use the optional Hydra menu for quick
 - `M-x org-gmail-download-at-point`: Download new messages for the thread at point.
 - `M-x org-gmail-sync-email-ids`: Sync and find duplicate email IDs.
 - `M-x org-gmail-trash-at-point`: Move the email or thread at point to the trash.
+- `M-x org-gmail-add-action-at-point`: Create an actionable sub-task for the email at point.
+- `M-x org-gmail-defer-at-point`: Defer (snooze) an email in Gmail.
+- `M-x org-gmail-reply-at-point`: Reply to an email.
+- `M-x org-gmail-delegate-at-point`: Delegate (forward) an email.
 
 ** Link Commands:
 - `M-x org-gmail-copy-link-at-point`: Copies a `org-gmail:` link for the email at point.
@@ -106,7 +116,8 @@ This provides a convenient pop-up menu with single-key shortcuts for all `org-gm
 _d_: Download by label      _e_: Edit label at point     _l_: Copy link
 _D_: Download at point      _b_: Bulk move labels          _L_: Insert link
 _s_: Sync labels            _c_: Create label              _x_: Delete label
-_S_: Sync email IDs         _t_: Trash at point
+_S_: Sync email IDs         _t_: Trash at point            _a_: Add action
+_r_: Reply                  _f_: Delegate (forward)      _z_: Defer (snooze)
 _q_: Quit
 "
   ("d" org-gmail-download-by-label)
@@ -120,6 +131,10 @@ _q_: Quit
   ("t" org-gmail-trash-at-point)
   ("l" org-gmail-copy-link-at-point)
   ("L" org-gmail-insert-link)
+  ("a" org-gmail-add-action-at-point)
+  ("r" org-gmail-reply-at-point)
+  ("f" org-gmail-delegate-at-point)
+  ("z" org-gmail-defer-at-point)
   ("q" nil "quit"))
 
 (defun org-gmail-hydra ()
@@ -157,20 +172,21 @@ This enables `org-gmail:` links, allowing you to jump directly to an email entry
 `org-gmail` is a great fit for a GTD workflow. You can process your Gmail inbox and convert actionable emails into Org Mode tasks.
 
 - Process Inbox :: In Gmail, apply a label like `ToProcess` to emails that require action.
--  Download :: Use `M-x org-gmail-download-by-label` to pull all emails with the `ToProcess` label into your `index.org` file.
--  Refile :: Go through the new entries in your inbox file. For each one, you can:
-    -   Add a `TODO` keyword.
-    -   Schedule it or set a deadline.
-    -   Refile it to the appropriate project file.
-    -   Use `M-x org-gmail-edit-label-at-point` to change the label in Gmail (e.g., to `Reference` or `Projects/ProjectName`).
+- Download :: Use `M-x org-gmail-download-by-label` to pull all emails with the `ToProcess` label into your `index.org` file.
+- Refile :: Go through the new entries in your inbox file. For each one, you can:
+    -   **Delete :: If it's not needed, use `M-x org-gmail-trash-at-point`.
+    -   **Defer :: If it's not actionable now, use `M-x org-gmail-defer-at-point` to snooze it.
+    -   **Do (Reply) :: If it takes less than 2 minutes, reply directly with `M-x org-gmail-reply-at-point`.
+    -   **Delegate :: If it's for someone else, forward it with `M-x org-gmail-delegate-at-point`.
+    -   **To-Do :: If it's a larger task, use `M-x org-gmail-add-action-at-point` to create a `TODO` sub-task that will appear in your agenda.
 
 ** P.A.R.A. Method
 
 The P.A.R.A. (Projects, Areas, Resources, Archives) method is also well-supported.
 
--  Labeling :: In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
--  Download :: Use `M-x org-gmail-download-by-label` to download emails related to a specific project or area.
--  Lifecycle Management :: When a project is finished, use `M-x org-gmail-bulk-move-labels` to move all threads from `1Projects/ClientWebsite` to `4Archives/2025/ClientWebsite`. This automatically updates both Gmail and all the `:LABEL:` properties in your Org files, keeping everything in sync.
+- Labeling :: In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
+- Download :: Use `M-x org-gmail-download-by-label` to download emails related to a specific project or area.
+- Lifecycle Management :: When a project is finished, use `M-x org-gmail-bulk-move-labels` to move all threads from `1Projects/ClientWebsite` to `4Archives/2025/ClientWebsite`. This automatically updates both Gmail and all the `:LABEL:` properties in your Org files, keeping everything in sync.
 
 * Comparison with Other Emacs Mail Clients
 
@@ -182,6 +198,6 @@ These are powerful, full-featured email clients inside Emacs. They are designed 
 
 `org-gmail` is not a replacement for a full mail client. Instead, it's a tool for *integrating* your most important emails into your Org Mode knowledge base.
 
--  Focus :: `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
--  Workflow :: The intended workflow is to do your initial email triage in the Gmail web interface (or another client) and then use `org-gmail` to pull in the threads that are relevant to your projects and long-term notes.
--  Strength :: Its strength is its deep integration with Org Mode's structure and linking capabilities, not in managing your day-to-day email flow.
+-   **Focus :: `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
+-   **Workflow :: The intended workflow is to do your initial email triage in the Gmail web interface (or another client) and then use `org-gmail` to pull in the threads that are relevant to your projects and long-term notes.
+-   **Strength :: Its strength is its deep integration with Org Mode's structure and linking capabilities, not in managing your day-to-day email flow.
