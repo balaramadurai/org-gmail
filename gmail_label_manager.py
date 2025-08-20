@@ -192,20 +192,57 @@ def delete_thread(service, thread_id):
         print(f'An error occurred while deleting thread: {error}', file=sys.stderr)
         sys.exit(1)
 
+def parse_natural_language_time(time_str):
+    """Parses a natural language time string and returns a datetime object."""
+    now = datetime.now(pytz.utc)
+    time_str = time_str.lower()
+
+    # Simple cases
+    if "tomorrow" in time_str:
+        defer_until = now + timedelta(days=1)
+        if "morning" in time_str or "9am" in time_str:
+            return defer_until.replace(hour=9, minute=0, second=0, microsecond=0)
+        elif "evening" in time_str or "7pm" in time_str:
+            return defer_until.replace(hour=19, minute=0, second=0, microsecond=0)
+        return defer_until.replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    # "in X hours/days/weeks"
+    match = re.match(r"in (\d+) (hour|day|week)s?", time_str)
+    if match:
+        num = int(match.group(1))
+        unit = match.group(2)
+        if unit == "hour":
+            return now + timedelta(hours=num)
+        elif unit == "day":
+            return now + timedelta(days=num)
+        elif unit == "week":
+            return now + timedelta(weeks=num)
+
+    # "next Monday", "next Friday at 5pm" etc.
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    for i, day_name in enumerate(days):
+        if day_name in time_str:
+            days_ahead = i - now.weekday()
+            if days_ahead <= 0: # Target day has passed this week
+                days_ahead += 7
+            defer_until = now + timedelta(days=days_ahead)
+            # Check for specific time
+            time_match = re.search(r"(\d+)(am|pm)?", time_str)
+            if time_match:
+                hour = int(time_match.group(1))
+                if time_match.group(2) == "pm" and hour < 12:
+                    hour += 12
+                return defer_until.replace(hour=hour, minute=0, second=0, microsecond=0)
+            return defer_until.replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    # Default fallback
+    return (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+
 def defer_message(service, msg_id, defer_time_str):
     """Snoozes a message until a specific time."""
     try:
-        # A more robust time parsing could be added here
-        if "tomorrow" in defer_time_str:
-            defer_until = datetime.now(pytz.utc) + timedelta(days=1)
-            if "9am" in defer_time_str:
-                defer_until = defer_until.replace(hour=9, minute=0, second=0, microsecond=0)
-        elif "in 2 hours" in defer_time_str:
-            defer_until = datetime.now(pytz.utc) + timedelta(hours=2)
-        else:
-            # Default to tomorrow morning
-            defer_until = (datetime.now(pytz.utc) + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
-
+        defer_until = parse_natural_language_time(defer_time_str)
         snooze_request = {
             'snoozeUntil': defer_until.isoformat()
         }
@@ -214,15 +251,22 @@ def defer_message(service, msg_id, defer_time_str):
     except HttpError as error:
         print(f'An error occurred while snoozing the message: {error}', file=sys.stderr)
         sys.exit(1)
+    except AttributeError:
+        print("AttributeError: 'Resource' object has no attribute 'snooze'.", file=sys.stderr)
+        print("This likely means your google-api-python-client library is outdated.", file=sys.stderr)
+        print("Please upgrade it with: pip install --upgrade google-api-python-client", file=sys.stderr)
+        sys.exit(1)
 
-def reply_to_message(service, msg_id, message_body):
+def reply_to_message(service, msg_id, message_body, to_recipients, cc_recipients):
     """Sends a reply to a specific message."""
     try:
-        original_message = service.users().messages().get(userId='me', id=msg_id, format='metadata', metadataHeaders=['subject', 'from', 'to', 'cc', 'message-id', 'references']).execute()
+        original_message = service.users().messages().get(userId='me', id=msg_id, format='metadata', metadataHeaders=['subject', 'message-id', 'references']).execute()
         headers = {h['name'].lower(): h['value'] for h in original_message['payload']['headers']}
         
         reply = MIMEText(message_body)
-        reply['to'] = headers['from']
+        reply['to'] = to_recipients
+        if cc_recipients:
+            reply['cc'] = cc_recipients
         reply['subject'] = "Re: " + headers['subject']
         reply['In-Reply-To'] = headers['message-id']
         reply['References'] = headers.get('references', '') + ' ' + headers['message-id']
@@ -598,8 +642,8 @@ def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, th
         return
     
     if reply_args:
-        msg_id, message_body = reply_args
-        reply_to_message(service, msg_id, message_body)
+        msg_id, message_body, to_recipients, cc_recipients = reply_args
+        reply_to_message(service, msg_id, message_body, to_recipients, cc_recipients)
         return
 
     if delegate_args:
@@ -719,7 +763,7 @@ if __name__ == '__main__':
     parser.add_argument('--bulk-move-labels', nargs=2, metavar=('OLD_LABEL', 'NEW_LABEL'), help="Move all threads from an old label to a new one.")
     parser.add_argument('--ignore-labels', nargs='*', help="A list of regex patterns for labels to ignore during sync.")
     parser.add_argument('--defer', nargs=2, metavar=('MSG_ID', 'TIME'), help="Snooze a message.")
-    parser.add_argument('--reply', nargs=2, metavar=('MSG_ID', 'BODY'), help="Reply to a message.")
+    parser.add_argument('--reply', nargs=4, metavar=('MSG_ID', 'BODY', 'TO', 'CC'), help="Reply to a message.")
     parser.add_argument('--delegate', nargs=3, metavar=('MSG_ID', 'RECIPIENT', 'NOTE'), help="Forward a message.")
     
     args = parser.parse_args()

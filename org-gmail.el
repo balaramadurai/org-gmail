@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 Bala Ramadurai
 
 ;; Author: Bala Ramadurai <bala@balaramadurai.net>
-;; Version: 1.2
+;; Version: 1.3
 ;; Keywords: org, gmail, email
 ;; Package-Requires: ((emacs "25.1"))
 
@@ -372,6 +372,7 @@
            (level (org-outline-level))
            (action-text (read-string "Next action: ")))
       (when (not (string-empty-p action-text))
+        (org-todo "TODO")
         (org-end-of-subtree)
         (insert (format "\n%s TODO %s\n:PROPERTIES:\n:EMAIL_LINK: [[org-gmail:%s]]\n:END:\n"
                         (make-string (1+ level) ?*)
@@ -385,17 +386,17 @@
   (let ((email-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "EMAIL_ID"))))
     (if (not email-id)
         (message "No EMAIL_ID property found at point.")
-      (let ((defer-time (completing-read "Snooze until: " '("in 2 hours" "tomorrow at 9am") nil t "tomorrow at 9am")))
+      (let ((defer-time (read-string "Snooze until (e.g., 'in 2 hours', 'tomorrow at 9am', 'next monday'): " "tomorrow at 9am")))
         (when (y-or-n-p (format "Really snooze this email until %s and delete from Org?" defer-time))
           (let* ((command-args (list "--defer" email-id defer-time)))
             (org-gmail--run-sync-process command-args "*Gmail Defer*"))
           (org-cut-subtree))))))
 
-(defun org-gmail--reply-send (email-id reply-buffer)
+(defun org-gmail--reply-send (email-id to-recipients cc-recipients reply-buffer)
   "Send the reply and kill the buffer."
   (with-current-buffer reply-buffer
     (let* ((reply-body (buffer-substring-no-properties (point-min) (point-max)))
-           (command-args (list "--reply" email-id reply-body)))
+           (command-args (list "--reply" email-id reply-body to-recipients cc-recipients)))
       (org-gmail--run-sync-process command-args "*Gmail Reply Send*")))
   (kill-buffer reply-buffer))
 
@@ -407,17 +408,28 @@
 (defun org-gmail-reply-at-point ()
   "Reply to the email at point."
   (interactive)
-  (let ((email-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "EMAIL_ID"))))
+  (let ((email-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "EMAIL_ID")))
+        (from (save-excursion (org-back-to-heading t) (org-entry-get (point) "FROM")))
+        (to (save-excursion (org-back-to-heading t) (org-entry-get (point) "TO")))
+        (cc (save-excursion (org-back-to-heading t) (org-entry-get (point) "CC"))))
     (if (not email-id)
         (message "No EMAIL_ID property found at point.")
-      (let ((reply-buffer (get-buffer-create "*Gmail Reply*")))
+      (let* ((reply-type (completing-read "Reply or Reply All? " '("Reply" "Reply All") nil t "Reply All"))
+             (to-recipients (if (string= reply-type "Reply")
+                                from
+                              (concat from ", " to)))
+             (cc-recipients (if (string= reply-type "Reply")
+                                ""
+                              (or cc "")))
+             (final-to (read-string "To: " to-recipients))
+             (final-cc (read-string "Cc: " cc-recipients))
+             (reply-buffer (get-buffer-create "*Gmail Reply*")))
         (with-current-buffer reply-buffer
           (erase-buffer)
-          (insert ";; Enter your reply below. C-c C-c to send, C-c C-k to cancel.\n\n")
           (let ((map (make-keymap)))
             (set-keymap-parent map (make-sparse-keymap))
             (define-key map (kbd "C-c C-c")
-              `(lambda () (interactive) (org-gmail--reply-send ,email-id ,reply-buffer)))
+              `(lambda () (interactive) (org-gmail--reply-send ,email-id ,final-to ,final-cc ,reply-buffer)))
             (define-key map (kbd "C-c C-k")
               `(lambda () (interactive) (org-gmail--reply-cancel ,reply-buffer)))
             (use-local-map map)))
