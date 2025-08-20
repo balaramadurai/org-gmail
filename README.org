@@ -4,6 +4,10 @@
 
 org-gmail is a package for Emacs that allows you to fetch entire Gmail threads or individual messages and save them as entries in your Org mode files. It uses the Gmail API via a companion Python script.
 
+* Screenshot
+
+[[./Org-gmail-Screenshot.png]]
+
 * Features
 
 - Create and delete labels in Gmail.
@@ -14,8 +18,8 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 - Download new messages for a specific thread.
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
-- Defer (snooze) emails in Gmail.
-- Reply to and delegate (forward) emails directly from Emacs.
+- Defer (snooze) emails in Gmail using natural language (e.g., "next monday").
+- Reply to and delegate (forward) emails directly from Emacs, with full control over recipients.
 - Create actionable sub-tasks for emails that will appear in your agenda.
 
 * Optional Features (with suggested configuration)
@@ -32,6 +36,8 @@ This package relies on a Python script with a few dependencies. You can install 
 #+BEGIN_SRC sh
 pip install --upgrade google-api-python-client google-auth-httplib2 google-auth-oauthlib html2text pytz
 #+END_SRC
+
+**Note on the `snooze` feature:** The ability to snooze emails was added to the Google API client library in a relatively recent version. If you encounter an `AttributeError: 'Resource' object has no attribute 'snooze'`, it means your library is outdated. Please run the command above to upgrade.
 
 ** 2. Gmail API Credentials
 
@@ -95,7 +101,7 @@ You can call the functions individually or use the optional Hydra menu for quick
 - `M-x org-gmail-reply-at-point`: Reply to an email.
 - `M-x org-gmail-delegate-at-point`: Delegate (forward) an email.
 
-** Link Commands:
+** Link Commands (requires `org-ql`):
 - `M-x org-gmail-copy-link-at-point`: Copies a `org-gmail:` link for the email at point.
 - `M-x org-gmail-insert-link`: Inserts a `org-gmail:` link to an email you select from a list.
 
