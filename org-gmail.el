@@ -37,7 +37,7 @@
 
 ;;; Code:
 
-(require 'subr-x)  ;; Ensure progress-reporter functions are available
+(require 'subr-x)  ;; For utility functions
 (require 'org)     ;; For org-save-all-org-buffers and org-element-at-point
 
 (defgroup org-gmail nil
@@ -74,52 +74,88 @@
   :type '(repeat regexp)
   :group 'org-gmail)
 
-(defun org-gmail--display-sync-buffer (buffer)
-  "Display the sync buffer in a horizontal split at the bottom."
-  (display-buffer-in-side-window buffer '((side . bottom) (window-height . 15))))
-
 (defun org-gmail--run-sync-process (command-args buffer-name)
-  "Helper function to run the Gmail sync Python script asynchronously."
+  "Helper function to run the Gmail sync Python script asynchronously with spinner feedback."
   (let* ((buffer (get-buffer-create buffer-name))
-         (progress-reporter (make-progress-reporter "Syncing emails from Gmail..."))
          (script-path (expand-file-name org-gmail-python-script))
          (command (append (list "python3" script-path)
                           command-args
-                          (list "--credentials" (expand-file-name org-gmail-credentials-file)))))
-    (org-gmail--display-sync-buffer buffer)
+                          (list "--credentials" (expand-file-name org-gmail-credentials-file))))
+         (process nil)
+         (spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"])
+         (spinner-index 0)
+         (current-label "")
+         (spinner-timer nil))
     (with-current-buffer buffer
       (erase-buffer)
-      (insert (format "Running command: %s\n\n" (string-join command " ")))
-    (let ((process (apply #'start-process "gmail-sync" buffer command)))
-      (when process
-        (set-process-sentinel
-         process
-         (lambda (proc event)
-           (with-current-buffer (process-buffer proc)
-             (when-let ((window (get-buffer-window (process-buffer proc))))
-               (set-window-point window (point-max))))
-           (when (eq (process-status proc) 'exit)
-             (if progress-reporter
-                 (progress-reporter-done progress-reporter)
-               (message "Syncing emails...done"))
-             (with-current-buffer (process-buffer proc)
-               (if (zerop (process-exit-status proc))
-                   (progn
-                     (message "Finished downloading successfully.")
-                     (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-                 (message "Error downloading emails. Check the %s buffer." (buffer-name (process-buffer proc))))))))
-        (set-process-query-on-exit-flag process nil)
-        (run-at-time org-gmail-process-timeout nil
-                     (lambda ()
-                       (when (process-live-p process)
-                         (kill-process process)
-                         (with-current-buffer buffer
-                           (goto-char (point-max))
-                           (insert "\n[Error] Process timed out after "
-                                   (number-to-string org-gmail-process-timeout)
-                                   " seconds\n"))
-                         (message "Gmail sync timed out"))))
-        (when progress-reporter (progress-reporter-update progress-reporter 50)))))))
+      (insert (format "Running command: %s\n\n" (string-join command " "))))
+    (setq process (apply #'start-process "gmail-sync" buffer command))
+    (when process
+      ;; Set up process filter to capture output and extract status
+      (set-process-filter
+       process
+       (lambda (proc output)
+         (with-current-buffer (process-buffer proc)
+           (goto-char (point-max))
+           (insert output))
+         ;; Parse output for important status messages (skip DEBUG lines)
+         (let ((lines (split-string output "\n")))
+           (dolist (line lines)
+             (when (and (not (string-empty-p line))
+                        (not (string-match-p "^DEBUG:" line)))  ;; Skip DEBUG lines
+               ;; Extract current label being synced
+               (when (string-match "for label '\\([^']+\\)'" line)
+                 (setq current-label (match-string 1 line)))
+               ;; Show error messages in mini-buffer
+               (when (string-match-p "\\[Error\\]\\|error occurred\\|An error" line)
+                 (message "❌ %s" line))
+               ;; Show action messages
+               (when (string-match-p "Successfully appended\\|created successfully\\|moved to trash\\|moved from\\|delegated to" line)
+                 (message "📧 %s" line))
+               ;; Show informational status
+               (when (string-match-p "No.*found\\|No messages\\|already downloaded" line)
+                 (message "ℹ️  %s" line))
+               ;; Show completion status
+               (when (string-match-p "Finished\\|completed successfully\\|Bulk move completed" line)
+                 (when spinner-timer (cancel-timer spinner-timer))
+                 (message "✅ %s" line)))))))
+      
+      ;; Create spinner animation timer
+      (setq spinner-timer
+            (run-with-timer 0 0.1
+              (lambda ()
+                (when (process-live-p process)
+                  (let ((spinner-char (aref spinner-frames (mod spinner-index (length spinner-frames)))))
+                    (if (string-empty-p current-label)
+                        (message "%s Syncing emails..." spinner-char)
+                      (let ((label-display (if (> (length current-label) 50)
+                                              (concat (substring current-label 0 47) "...")
+                                            current-label)))
+                        (message "%s Syncing: %s" spinner-char label-display)))
+                    (setq spinner-index (1+ spinner-index)))))))
+      
+      
+      (set-process-sentinel
+       process
+       (lambda (proc event)
+         (when spinner-timer (cancel-timer spinner-timer))
+         (when (eq (process-status proc) 'exit)
+           (if (zerop (process-exit-status proc))
+               (progn
+                 (message "✅ Gmail sync completed successfully!")
+                 (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
+             (progn
+               (message "❌ Error syncing Gmail. Check the %s buffer for details." buffer-name))))))
+      
+      (set-process-query-on-exit-flag process nil)
+      
+      ;; Set timeout
+      (run-at-time org-gmail-process-timeout nil
+                   (lambda ()
+                     (when (process-live-p process)
+                       (kill-process process)
+                       (when spinner-timer (cancel-timer spinner-timer))
+                       (message "⏱️  Gmail sync timed out after %d seconds" org-gmail-process-timeout)))))))
 
 (defun org-gmail-create-label ()
   "Create a new Gmail label."
@@ -145,23 +181,18 @@
   "Asynchronously fetch Gmail labels, then prompt the user to select one for download."
   (interactive)
   (org-save-all-org-buffers)
+  (message "⠙ Fetching Gmail labels...")
   (let* ((buffer-name "*Gmail Label Fetch*")
          (buffer (get-buffer-create buffer-name))
          (script-path (expand-file-name org-gmail-python-script))
          (command (list "python3" script-path "--list-labels"
                         "--credentials" (expand-file-name org-gmail-credentials-file))))
-    (org-gmail--display-sync-buffer buffer)
-    (with-current-buffer buffer
-      (erase-buffer)
-      (insert "Fetching Gmail labels...\n\n"))
+    (with-current-buffer buffer (erase-buffer))
     (let ((process (apply #'start-process "gmail-labels" buffer command)))
       (when process
         (set-process-sentinel
          process
          (lambda (proc event)
-           (with-current-buffer (process-buffer proc)
-             (when-let ((window (get-buffer-window (process-buffer proc))))
-               (set-window-point window (point-max))))
            (when (eq (process-status proc) 'exit)
              (let ((proc-buffer (process-buffer proc)))
                (with-current-buffer proc-buffer
@@ -169,7 +200,8 @@
                      (let* ((labels (org-gmail--extract-labels-from-output (buffer-string))))
                        (if labels
                            (progn
-                             (kill-buffer proc-buffer) ; Kill the fetch buffer before prompting
+                             (message "✅ Labels fetched. Select one to download...")
+                             (kill-buffer proc-buffer)
                              (run-with-timer 0 nil
                                              (lambda (labels-list)
                                                (let ((label-name (completing-read "Select Gmail label: " labels-list nil t)))
@@ -181,13 +213,16 @@
                                                        (org-gmail--run-sync-process command-args "*Gmail Sync*"))
                                                    (message "No label selected."))))
                                              labels))
-                         (message "Error: Could not extract label list from script output. Check the %s buffer." (buffer-name proc-buffer))))
-                   (message "Error fetching Gmail labels. Check the %s buffer." (buffer-name proc-buffer))))))))))))
+                         (progn
+                           (message "❌ Could not extract label list from script output. Check buffer."))))
+                   (progn
+                     (message "❌ Error fetching Gmail labels."))))))))))))
 
 (defun org-gmail-download-at-point ()
   "Download new messages for the thread at point and insert them after the last known message for that thread."
   (interactive)
   (org-save-all-org-buffers)
+  (message "⠙ Downloading thread...")
   (let ((original-buffer (current-buffer))
         (thread-id
          (save-excursion
@@ -207,9 +242,9 @@
                     (if last-pos
                         (progn
                           (goto-char last-pos)
-                          (org-end-of-subtree t t) ; Go to the end of the entry
+                          (org-end-of-subtree t t)
                           (point))
-                      nil)))) ; If not found, insertion-point is nil
+                      nil))))
                (buffer-name "*Gmail Insert Thread*")
                (buffer (get-buffer-create buffer-name))
                (script-path (expand-file-name org-gmail-python-script))
@@ -226,9 +261,6 @@
                   (set-process-sentinel
                    process
                    (lambda (proc event)
-                     (with-current-buffer (process-buffer proc)
-                       (when-let ((window (get-buffer-window (process-buffer proc))))
-                         (set-window-point window (point-max))))
                      (when (eq (process-status proc) 'exit)
                        (with-current-buffer (process-buffer proc)
                          (if (zerop (process-exit-status proc))
@@ -242,15 +274,17 @@
                                                                        (+ start-pos (length start-marker))
                                                                        end-pos))))
                                      (if (string-blank-p output)
-                                         (message "No new messages for thread %s" thread-id)
+                                         (progn
+                                           (message "ℹ️  No new messages for thread %s" thread-id))
                                        (with-current-buffer original-buffer
                                          (save-excursion
                                            (goto-char insertion-point)
                                            (insert "\n" output))
-                                         (message "New messages inserted for thread %s" thread-id))))
-                                 (message "Error: Could not extract email content from script output.")))
+                                         (message "✅ New messages inserted for thread %s" thread-id))))
+                                 (progn
+                                   (message "❌ Could not extract email content from script output."))))
                            (progn
-                             (message "Error downloading thread to insert.")
+                             (message "❌ Error downloading thread.")
                              (display-buffer (process-buffer proc))))
                          (kill-buffer (process-buffer proc))))))))
             (message "Could not find existing entries for thread %s in the current buffer. Cannot insert." thread-id)))
@@ -300,6 +334,7 @@
     (if (not id-to-trash)
         (message "Could not find required ID to trash at point.")
       (when (y-or-n-p (format "Really move %s %s to trash in Gmail and delete from this file?" trash-target id-to-trash))
+        (message "⠙ Moving to trash...")
         (let* ((command-arg (if (string= trash-target "message") "--delete-message" "--delete-thread"))
                (command-args (list command-arg id-to-trash))
                (buffer-name "*Gmail Trash*")
@@ -308,36 +343,33 @@
                (command (append (list "python3" script-path)
                                 command-args
                                 (list "--credentials" (expand-file-name org-gmail-credentials-file)))))
-          (org-gmail--display-sync-buffer buffer)
           (with-current-buffer buffer (erase-buffer))
           (let ((process (apply #'start-process "gmail-trash" buffer command)))
             (set-process-sentinel
              process
              (lambda (proc event)
-               (with-current-buffer (process-buffer proc)
-                 (when-let ((window (get-buffer-window (process-buffer proc))))
-                   (set-window-point window (point-max))))
                (when (eq (process-status proc) 'exit)
                  (with-current-buffer (process-buffer proc)
                    (if (zerop (process-exit-status proc))
                        (progn
-                         (message "%s %s moved to trash successfully." (capitalize trash-target) id-to-trash)
+                         (message "✅ %s moved to trash successfully." (capitalize trash-target))
                          (with-current-buffer original-buffer
                            (save-excursion
                              (goto-char point-to-delete)
                              (org-cut-subtree)))
                          (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-                     (message "Error moving %s to trash. Check the %s buffer." trash-target (buffer-name (process-buffer proc))))))))))))))
+                     (progn
+                       (message "❌ Error moving %s to trash." trash-target)))))))))))))
 
 (defun org-gmail-delete-label ()
   "Delete a Gmail label."
   (interactive)
+  (message "⠙ Fetching labels...")
   (let* ((buffer-name "*Gmail Label Fetch for Delete*")
          (buffer (get-buffer-create buffer-name))
          (script-path (expand-file-name org-gmail-python-script))
          (command (list "python3" script-path "--list-labels"
                         "--credentials" (expand-file-name org-gmail-credentials-file))))
-    (org-gmail--display-sync-buffer buffer)
     (with-current-buffer buffer (erase-buffer) (insert "Fetching labels to delete...\n"))
     (let ((process (apply #'start-process "gmail-labels-delete" buffer command)))
       (when process
@@ -349,6 +381,7 @@
                (with-current-buffer proc-buffer
                  (if (zerop (process-exit-status proc))
                      (let* ((labels (org-gmail--extract-labels-from-output (buffer-string))))
+                       
                        (kill-buffer proc-buffer)
                        (run-with-timer 0 nil
                                        (lambda (labels-list)
@@ -359,7 +392,9 @@
                                                  (org-gmail--run-sync-process command-args "*Gmail Delete Label*"))
                                              (message "Label deletion cancelled."))))
                                        labels))
-                   (message "Error fetching labels for deletion. Check %s" (buffer-name proc-buffer))))))))))))
+                   (progn
+                     
+                     (message "❌ Error fetching labels for deletion."))))))))))))
 
 ;;; Action Handling
 
@@ -378,7 +413,7 @@
                         (make-string (1+ level) ?*)
                         action-text
                         email-id))
-        (message "Action task created for email.")))))
+        (message "✅ Action task created for email.")))))
 
 (defun org-gmail-defer-at-point ()
   "Defer (snooze) the email at point in Gmail."
@@ -496,13 +531,13 @@
 
 (defun org-gmail--modify-thread-label-in-gmail-and-org (thread-id old-label new-label)
   "Call the python script to modify the label in Gmail, then update Org files."
+  (message "⠙ Updating label...")
   (let* ((command-args (list "--modify-thread-labels" thread-id old-label new-label))
          (buffer-name "*Gmail Edit Label*")
          (buffer (get-buffer-create buffer-name))
          (script-path (expand-file-name org-gmail-python-script))
          (command (append (list "python3" script-path) command-args
                           (list "--credentials" (expand-file-name org-gmail-credentials-file)))))
-    (org-gmail--display-sync-buffer buffer)
     (with-current-buffer buffer (erase-buffer))
     (let ((process (apply #'start-process "gmail-edit-label" buffer command)))
       (set-process-sentinel
@@ -511,20 +546,23 @@
          (when (eq (process-status proc) 'exit)
            (if (zerop (process-exit-status proc))
                (progn
-                 (message "Label updated in Gmail. Now updating Org files...")
+                 
+                 (message "✅ Label updated in Gmail. Updating Org files...")
                  (org-gmail--update-label-property-in-org-files thread-id new-label)
                  (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-             (message "Error updating label in Gmail. Check %s" (buffer-name (process-buffer proc))))))))))
+             (progn
+               
+               (message "❌ Error updating label in Gmail.")))))))))
 
 (defun org-gmail-bulk-move-labels ()
   "Move all threads from one label to another, in Gmail and in Org files."
   (interactive)
+  (message "⠙ Fetching labels...")
   (let* ((buffer-name "*Gmail Label Fetch for Bulk Move*")
          (buffer (get-buffer-create buffer-name))
          (script-path (expand-file-name org-gmail-python-script))
          (command (list "python3" script-path "--list-labels"
                         "--credentials" (expand-file-name org-gmail-credentials-file))))
-    (org-gmail--display-sync-buffer buffer)
     (with-current-buffer buffer (erase-buffer) (insert "Fetching labels for bulk move...\n"))
     (let ((process (apply #'start-process "gmail-labels-bulk-move" buffer command)))
       (when process
@@ -536,6 +574,7 @@
                (with-current-buffer proc-buffer
                  (if (zerop (process-exit-status proc))
                      (let* ((labels (org-gmail--extract-labels-from-output (buffer-string))))
+                       
                        (kill-buffer proc-buffer)
                        (run-with-timer 0 nil
                                        (lambda (labels-list)
@@ -546,20 +585,22 @@
                                                (org-gmail--run-bulk-move-process old-label new-label "*Gmail Bulk Move*")
                                              (message "Bulk move cancelled."))))
                                        labels))
-                   (message "Error fetching labels for bulk move. Check %s" (buffer-name proc-buffer))))))))))))
+                   (progn
+                     
+                     (message "❌ Error fetching labels for bulk move."))))))))))))
 
 (defun org-gmail--run-bulk-move-process (old-label new-label buffer-name)
   "Run the bulk move process and update Org files on success."
+  (message "⠙ Bulk moving labels...")
   (let* ((buffer (get-buffer-create buffer-name))
          (command-args (list "--bulk-move-labels" old-label new-label))
          (script-path (expand-file-name org-gmail-python-script))
          (command (append (list "python3" script-path)
                           command-args
                           (list "--credentials" (expand-file-name org-gmail-credentials-file)))))
-    (org-gmail--display-sync-buffer buffer)
     (with-current-buffer buffer
       (erase-buffer)
-      (insert (format "Running command: %s\n\n" (string-join command " ")))
+      (insert (format "Running command: %s\n\n" (string-join command " "))))
     (let ((process (apply #'start-process "gmail-bulk-move" buffer command)))
       (when process
         (set-process-sentinel
@@ -569,11 +610,14 @@
              (with-current-buffer (process-buffer proc)
                (if (zerop (process-exit-status proc))
                    (progn
-                     (message "Bulk move successful in Gmail. Now updating local Org files...")
+                     
+                     (message "✅ Bulk move successful in Gmail. Updating Org files...")
                      (org-gmail--bulk-update-label-property-in-org-files old-label new-label)
-                     (message "Local Org files updated.")
+                     (message "✅ Local Org files updated.")
                      (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
-                 (message "Error during bulk move. Check the %s buffer." (buffer-name (process-buffer proc)))))))))))))
+                 (progn
+                   
+                   (message "❌ Error during bulk move.")))))))))))
 
 (provide 'org-gmail)
 
