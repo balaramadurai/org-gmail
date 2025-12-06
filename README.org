@@ -1,4 +1,35 @@
-#+TITLE: org-gmail: Fetch Gmail Threads into Org Mode
+#+TITLE: org-gmail: Gmail Meets Org Mode (and they actually get along)
+
+* Why org-gmail?
+
+You love Org Mode. You tolerate email. What if they could work together?
+
+** The Problem
+
+- You already have a great email client (Gmail's web UI is fast)
+- You already have a great task/knowledge system (Org Mode)
+- But important emails live in one place, and your real work happens in another
+- Existing solutions (Gnus, mu4e, notmuch) want to BE your email client—500+ lines of config, all or nothing
+
+** The Solution
+
+=org-gmail= is a *bridge*, not a replacement. It lets you:
+
+1. *Triage in Gmail* — Use the fast web UI for the easy stuff
+2. *Process in Org Mode* — Pull important threads where you do real work
+3. *Two-way sync* — Changes flow both directions
+
+Think of it as =org-capture= for email, but bidirectional.
+
+** Who Is This For?
+
+- GTD practitioners who want email context in their weekly reviews
+- P.A.R.A. users who want Gmail labels mirroring their folder structure
+- Anyone who thinks "I wish this email thread was in my Org file"
+
+#+begin_quote
+org-gmail: For people who like Org Mode more than email (but still have to deal with email).
+#+end_quote
 
 * Introduction
 
@@ -18,7 +49,7 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 - Download new messages for a specific thread.
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
-- Defer (snooze) emails in Gmail using natural language (e.g., "next monday").
+- Defer (snooze) emails using natural language (e.g., "next monday"). /Note: Gmail API snooze support is limited; see Known Issues./
 - Reply to and delegate (forward) emails directly from Emacs, with full control over recipients.
 - Create actionable sub-tasks for emails that will appear in your agenda.
 
@@ -37,7 +68,7 @@ This package relies on a Python script with a few dependencies. You can install 
 pip install --upgrade google-api-python-client google-auth-httplib2 google-auth-oauthlib html2text pytz
 #+END_SRC
 
-**Note on the `snooze` feature:** The ability to snooze emails was added to the Google API client library in a relatively recent version. If you encounter an `AttributeError: 'Resource' object has no attribute 'snooze'`, it means your library is outdated. Please run the command above to upgrade.
+**Note on the `snooze` feature:** The Gmail API does not officially expose a public snooze endpoint. The =defer= command may not work as expected. See [[https://issuetracker.google.com/issues/109952618][this feature request]] for updates from Google.
 
 ** 2. Gmail API Credentials
 
@@ -200,10 +231,103 @@ The P.A.R.A. (Projects, Areas, Resources, Archives) method is also well-supporte
 
 These are powerful, full-featured email clients inside Emacs. They are designed to manage your entire email workflow: reading, writing, sending, and organizing.
 
+*Short answer:* They're amazing. Use them if they work for you.
+
+*The honest answer:*
+- They want to BE your email client
+- They require ~500 lines of config (minimum)
+- They struggle with Gmail's labels and threading
+- They make you choose: "All in Emacs" or nothing
+
 ** org-gmail
 
-`org-gmail` is not a replacement for a full mail client. Instead, it's a tool for *integrating* your most important emails into your Org Mode knowledge base.
+=org-gmail= says: "Why not both?"
 
--   **Focus:** `org-gmail` is focused on pulling email content into Org Mode so it can be linked to tasks, notes, and other parts of your system.
--   **Workflow:** The intended workflow is to do your initial email triage in the Gmail web interface (or another client) and then use `org-gmail` to pull in the threads that are relevant to your projects and long-term notes.
--   **Strength:** Its strength is its deep integration with Org Mode's structure and linking capabilities, not in managing your day-to-day email flow.
+It is not a replacement for a full mail client. Instead, it's a *bridge* for integrating your most important emails into your Org Mode knowledge base.
+
+| Feature | Gnus/mu4e/notmuch | org-gmail |
+|---------+-------------------+-----------|
+| Goal | Full email client | Gmail ↔ Org bridge |
+| Config | 500+ lines | ~20 lines |
+| Gmail labels | Partial support | Native support |
+| Offline | Yes | No (API required) |
+| All email | Yes | Selected threads |
+| Org integration | Links only | Full properties, sync |
+
+** What org-gmail Is NOT
+
+- A full email client
+- A replacement for Gnus/mu4e/notmuch
+- A way to read ALL your email in Emacs
+- Offline-capable
+
+** What org-gmail IS
+
+- A bridge between Gmail and Org Mode
+- A way to manage important email threads in Org
+- A GTD/P.A.R.A. power tool
+- ~800 lines of Python + ~600 lines of Elisp
+- Usable in 10 minutes, powerful for years
+
+* FAQ
+
+/Questions from the [[https://emacsconf.org/2025/talks/gmail/][EmacsConf 2025]] community. See the [[https://pad.emacsconf.org/2025-gmail][discussion pad]] for more./
+
+** How does it handle attachments?
+
+Currently, attachments are not downloaded. The email body (text/HTML converted to Org) is fetched, but attachments remain in Gmail. You can click the Gmail link in the entry to access them.
+
+*Future plans:* Attachment support is on the roadmap—likely downloading to a configurable directory with Org links to the files.
+
+** Do I need to know all my contacts' email addresses?
+
+For replies, the =FROM=, =TO=, and =CC= fields are pre-filled from the original email's properties. You can edit them interactively before sending. There's no built-in contact list, but completion could integrate with =BBDB= or similar in the future.
+
+** Can I use this with non-Gmail providers (FastMail, etc.)?
+
+Not directly. =org-gmail= is built specifically on the Gmail API for its native label and threading support.
+
+However, the *Org Mode integration patterns* could be adapted. For non-Gmail setups, consider:
+- [[https://github.com/gauteh/lieer][lieer]] — Gmail to Maildir sync (works with notmuch)
+- [[https://github.com/elizagamedev/mujmap][mujmap]] — JMAP to Maildir (works with FastMail)
+- [[https://github.com/JasonSKK/notmuch-lieer-sync][notmuch-lieer-sync]] — notmuch + lieer integration
+
+The Python backend could potentially be adapted for other APIs (Outlook Graph API, JMAP) in the future.
+
+** Do I risk sending emails to the wrong person?
+
+=org-gmail= is designed for *pulling email into Org* for task management, not as a primary email client. For critical communications:
+- Reply recipients are shown and editable before sending
+- Use Gmail's web UI for high-stakes messages
+- The tool is best for managing project context, not mission-critical sending
+
+** What's the main goal of org-gmail?
+
+The core goal is *an easier way to add emails into Org Mode and Org Agenda workflows*. It's not trying to replace your email client—it's trying to make email part of your knowledge management system.
+
+Think of it as: triage in Gmail, process in Org, stay in sync.
+
+** Will there be headers visible when composing replies?
+
+Good feedback! Currently the reply buffer is minimal. Adding visible headers (like =message-mode=) is a reasonable enhancement for a future version.
+
+* Related Projects
+
+For users who want different approaches to email in Emacs:
+
+- [[https://github.com/gauteh/lieer][lieer]] — Fast Gmail to Maildir sync using labels
+- [[https://github.com/elizagamedev/mujmap][mujmap]] — JMAP to Maildir (FastMail, etc.)
+- [[https://github.com/JasonSKK/notmuch-lieer-sync][notmuch-lieer-sync]] — notmuch integration with lieer
+- [[https://www.djcbsoftware.nl/code/mu/mu4e.html][mu4e]] — Full-featured Emacs email client
+- [[https://notmuchmail.org/][notmuch]] — Fast email indexing and search
+
+* Known Issues
+
+- *Snooze/Defer:* The Gmail API does not officially expose snooze functionality. The =org-gmail-defer-at-point= command may fail with an =AttributeError=. This is a [[https://issuetracker.google.com/issues/109952618][known limitation]] of the Gmail API.
+- *Rate Limits:* Downloading very large labels (10k+ emails) may hit Gmail API rate limits.
+- *OAuth Token Expiry:* In "test mode", tokens expire after 7 days. Publish your app for longer-lived tokens.
+- *Attachments:* Not currently downloaded (see FAQ).
+
+* Acknowledgments
+
+Thanks to the [[https://emacsconf.org/2025/][EmacsConf 2025]] community for feedback and questions that improved this documentation.
