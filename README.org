@@ -50,8 +50,11 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 - Insert new messages directly after the existing thread in your Org file.
 - Move messages or entire threads to the trash in Gmail.
 - Defer (snooze) emails using natural language (e.g., "next monday"). /Note: Gmail API snooze support is limited; see Known Issues./
-- Reply to and delegate (forward) emails directly from Emacs, with full control over recipients.
+- Reply to and delegate (forward) emails directly from Emacs, with full control over recipients. Sent replies are automatically inserted into the Org thread.
 - Create actionable sub-tasks for emails that will appear in your agenda.
+- Download and save email attachments to a configurable directory, with Org links for local access and options to view in Gmail.
+- Smart syncing: New messages in existing threads are appended to the thread's current Org file location, not the default inbox.
+- Automatic reply insertion: Sent replies appear immediately in the Org thread.
 
 * Optional Features (with suggested configuration)
 
@@ -108,10 +111,25 @@ This package is designed to be installed with `straight.el`. Add the following t
     (setq org-gmail-python-script "gmail_label_manager.py")
     (setq org-gmail-date-drawer "org-gmail")
     (setq org-gmail-process-timeout 300)
-    ;; Optional: Configure labels to ignore during sync
-    (setq org-gmail-sync-ignore-labels '("^4Archives/" "^3Resources/"))
-    )
-#+END_SRC
+     ;; Optional: Configure labels to ignore during sync
+     (setq org-gmail-sync-ignore-labels '("^4Archives/" "^3Resources/"))
+     )
+ #+END_SRC
+
+ ** Python Configuration
+
+ Create a ~config.json~ file in the same directory as ~gmail_label_manager.py~ with settings like:
+
+ #+BEGIN_SRC json
+ {
+   "api_timeout": 120,
+   "cache_path": ".label_cache.json",
+   "max_retries": 5,
+   "attachment_dir": "attachments/{label}"
+ }
+ #+END_SRC
+
+ The ~{label}~ placeholder in ~attachment_dir~ will be replaced with the label name (e.g., ~attachments/Work/~ for Work label).
 
 * Usage
 

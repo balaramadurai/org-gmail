@@ -74,8 +74,9 @@
   :type '(repeat regexp)
   :group 'org-gmail)
 
-(defun org-gmail--run-sync-process (command-args buffer-name)
-  "Helper function to run the Gmail sync Python script asynchronously with spinner feedback."
+(defun org-gmail--run-sync-process (command-args buffer-name &optional on-success)
+  "Helper function to run the Gmail sync Python script asynchronously with spinner feedback.
+ON-SUCCESS is a function to call on successful completion."
   (let* ((buffer (get-buffer-create buffer-name))
          (script-path (expand-file-name org-gmail-python-script))
          (command (append (list "python3" script-path)
@@ -141,9 +142,16 @@
          (when spinner-timer (cancel-timer spinner-timer))
          (when (eq (process-status proc) 'exit)
            (if (zerop (process-exit-status proc))
-               (progn
-                 (message "✅ Gmail sync completed successfully!")
-                 (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
+                (progn
+                   (message "✅ Gmail sync completed successfully!")
+                   (when on-success (funcall on-success))
+                   ;; Revert all agenda file buffers to show updates
+                   (dolist (file org-agenda-files)
+                     (let ((buf (get-file-buffer file)))
+                       (when buf
+                         (with-current-buffer buf
+                           (revert-buffer t t)))))
+                   (run-with-timer 2 nil (lambda (b) (when (get-buffer b) (kill-buffer b))) (process-buffer proc)))
              (progn
                (message "❌ Error syncing Gmail. Check the %s buffer for details." buffer-name))))))
       
@@ -429,16 +437,47 @@
 
 (defun org-gmail--reply-send (email-id to-recipients cc-recipients reply-buffer)
   "Send the reply and kill the buffer."
-  (with-current-buffer reply-buffer
-    (let* ((reply-body (buffer-substring-no-properties (point-min) (point-max)))
-           (command-args (list "--reply" email-id reply-body to-recipients cc-recipients)))
-      (org-gmail--run-sync-process command-args "*Gmail Reply Send*")))
-  (kill-buffer reply-buffer))
+  (let ((reply-body nil)
+        (thread-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "THREAD_ID")))
+        (subject (save-excursion (org-back-to-heading t) (org-entry-get (point) "SUBJECT"))))
+    (with-current-buffer reply-buffer
+      (setq reply-body (buffer-substring-no-properties (point-min) (point-max)))
+      (let* ((command-args (list "--reply" email-id reply-body to-recipients cc-recipients)))
+        (org-gmail--run-sync-process command-args "*Gmail Reply Send*"
+                                     (lambda ()
+                                       (org-gmail--insert-sent-reply thread-id subject reply-body)))))
+    (kill-buffer reply-buffer)))
 
 (defun org-gmail--reply-cancel (reply-buffer)
   "Cancel the reply and kill the buffer."
   (kill-buffer reply-buffer)
   (message "Reply cancelled."))
+
+(defun org-gmail--insert-sent-reply (thread-id subject reply-body)
+  "Insert the sent reply into the Org thread."
+  (let ((target-file (org-gmail--find-thread-file thread-id)))
+    (when target-file
+      (with-current-buffer (find-file-noselect target-file)
+        (org-gmail--append-to-thread thread-id subject reply-body)
+        (save-buffer)
+        (message "Sent reply inserted into %s" target-file)))))
+
+(defun org-gmail--find-thread-file (thread-id)
+  "Find the Org file containing the THREAD-ID."
+  (catch 'found
+    (dolist (file (org-agenda-files))
+      (with-current-buffer (find-file-noselect file)
+        (goto-char (point-min))
+        (when (re-search-forward (concat ":THREAD_ID: *" (regexp-quote thread-id)) nil t)
+          (throw 'found file))))
+    nil))
+
+(defun org-gmail--append-to-thread (thread-id subject reply-body)
+  "Append the reply to the thread in the current buffer."
+  (goto-char (point-min))
+  (when (re-search-forward (concat ":THREAD_ID: *" (regexp-quote thread-id)) nil t)
+    (org-end-of-subtree t)
+    (insert (format "\n*** Re: %s\n:PROPERTIES:\n:SENT: t\n:END:\n\n%s\n" subject reply-body))))
 
 (defun org-gmail-reply-at-point ()
   "Reply to the email at point."

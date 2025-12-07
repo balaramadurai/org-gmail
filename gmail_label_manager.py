@@ -1,10 +1,13 @@
 import argparse
 import base64
+import json
+import logging
 import os
 import pickle
 import re
 import sys
 import time
+from typing import Dict, List, Optional, Any
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -25,6 +28,27 @@ try:
 except ImportError:
     org_load = None
 
+# Set up logging
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Load config
+def load_config() -> Dict[str, Any]:
+    """Load configuration from config.json."""
+    config_path = 'config.json'
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logging.warning("Invalid config.json, using defaults")
+    return {}
+
+config = load_config()
+API_TIMEOUT = config.get('api_timeout', 120)
+CACHE_PATH = config.get('cache_path', '.label_cache.json')
+MAX_RETRIES = config.get('max_retries', 5)
+ATTACHMENT_DIR = config.get('attachment_dir', 'attachments')
+
 # This scope allows reading, composing, sending, and permanently deleting email.
 # We need it to move messages to trash.
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -32,8 +56,15 @@ MAX_RETRIES = 5
 BASE_DELAY = 2  # Seconds
 API_TIMEOUT = 120  # Seconds, increased for large mailboxes
 
-def get_gmail_service(credentials_path='credentials.json'):
-    """Authenticates with the Gmail API and returns a service object."""
+def get_gmail_service(credentials_path: str = 'credentials.json') -> Any:
+    """Authenticates with the Gmail API and returns a service object.
+
+    Args:
+        credentials_path: Path to the credentials JSON file.
+
+    Returns:
+        Gmail API service object.
+    """
     creds = None
     token_path = os.path.join(os.path.dirname(credentials_path), 'token.json')
     if os.path.exists(token_path):
@@ -52,11 +83,36 @@ def get_gmail_service(credentials_path='credentials.json'):
     service._http.timeout = API_TIMEOUT  # Set timeout for API calls
     return service
 
-def get_label_id_map(service):
-    """Returns a dictionary mapping label names to label IDs."""
+def get_label_id_map(service: Any) -> Dict[str, str]:
+    """Returns a dictionary mapping label names to label IDs, with caching.
+
+    Args:
+        service: Gmail API service object.
+
+    Returns:
+        Dict mapping label names to IDs.
+    """
+    if os.path.exists(CACHE_PATH):
+        try:
+            with open(CACHE_PATH, 'r') as f:
+                cached = json.load(f)
+            # Optionally, check if cache is recent, but for now, use it
+            return cached
+        except (json.JSONDecodeError, KeyError):
+            pass  # Fall back to API
+
     results = service.users().labels().list(userId='me').execute()
     labels = results.get('labels', [])
-    return {label['name']: label['id'] for label in labels}
+    label_map = {label['name']: label['id'] for label in labels}
+
+    # Cache the result
+    try:
+        with open(CACHE_PATH, 'w') as f:
+            json.dump(label_map, f)
+    except Exception:
+        pass  # Ignore cache write errors
+
+    return label_map
 
 def modify_thread_labels(service, thread_id, old_label_name, new_label_name):
     """Moves a thread from an old label to a new one."""
@@ -355,6 +411,83 @@ def parse_org_for_labels_from_properties(agenda_files):
                 print(f"Error reading {org_file} to find labels from properties: {e}", file=sys.stderr)
     return list(labels)
 
+def parse_org_for_thread_locations(agenda_files):
+    """Parses Org-mode files to find THREAD_ID locations."""
+    thread_locations = {}
+    thread_pattern = re.compile(r':THREAD_ID:\s*(.*)$')
+    for org_file in agenda_files.split(','):
+        org_file = os.path.expanduser(org_file.strip())
+        if org_file and os.path.exists(org_file):
+            try:
+                with open(org_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        match = thread_pattern.search(line)
+                        if match:
+                            thread_id = match.group(1).strip()
+                            thread_locations[thread_id] = org_file
+            except Exception as e:
+                print(f"Error reading {org_file} to find thread locations: {e}", file=sys.stderr)
+    return thread_locations
+
+def insert_under_thread(file_path, thread_id, content):
+    """Insert content under the thread heading in the Org file."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}", file=sys.stderr)
+        return
+
+    # Find the index of the :THREAD_ID: thread_id
+    thread_index = None
+    for i, line in enumerate(lines):
+        if f':THREAD_ID: {thread_id}' in line:
+            thread_index = i
+            break
+
+    if thread_index is None:
+        # Not found, append
+        try:
+            with open(file_path, 'a', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            print(f"Error appending to {file_path}: {e}", file=sys.stderr)
+        return
+
+    # Find the ** above
+    heading_index = None
+    for i in range(thread_index, -1, -1):
+        if lines[i].strip().startswith('** '):
+            heading_index = i
+            break
+
+    if heading_index is None:
+        # Append
+        try:
+            with open(file_path, 'a', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            print(f"Error appending to {file_path}: {e}", file=sys.stderr)
+        return
+
+    # Find the end of the subtree: next line with * not starting with ***
+    end_index = len(lines)
+    for i in range(heading_index + 1, len(lines)):
+        line = lines[i].strip()
+        if line.startswith('*') and not line.startswith('***'):
+            end_index = i
+            break
+
+    # Insert content at end_index
+    insert_content = content.strip() + '\n'
+    lines.insert(end_index, insert_content)
+
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
+    except Exception as e:
+        print(f"Error writing to {file_path}: {e}", file=sys.stderr)
+
 def list_messages(service, query=None, thread_id=None):
     """Lists messages from Gmail API with retries and better feedback."""
     for attempt in range(MAX_RETRIES):
@@ -435,7 +568,7 @@ def escape_org_headings(text):
     escaped_lines = [',' + line if line.strip().startswith('*') else line for line in lines]
     return '\n'.join(escaped_lines)
 
-def get_message_details(service, msg_id):
+def get_message_details(service, msg_id, label_name=None):
     """Fetches and parses the details of a single email message."""
     for attempt in range(MAX_RETRIES):
         try:
@@ -482,6 +615,25 @@ def get_message_details(service, msg_id):
             main_content = escape_org_headings(main_content)
             quoted_content = escape_org_headings(quoted_content)
 
+            # Download attachments
+            att_dir = ATTACHMENT_DIR.replace("{label}", label_name or "default")
+            attachments = []
+            for part in email_msg.walk():
+                if part.get_content_maintype() == 'multipart':
+                    continue
+                content_disposition = str(part.get('Content-Disposition'))
+                if 'attachment' in content_disposition:
+                    filename = part.get_filename()
+                    if filename:
+                        os.makedirs(att_dir, exist_ok=True)
+                        filepath = os.path.join(att_dir, filename)
+                        try:
+                            with open(filepath, 'wb') as f:
+                                f.write(part.get_payload(decode=True))
+                            attachments.append(filepath)
+                        except Exception as e:
+                            logging.error(f"Failed to save attachment {filename}: {e}")
+
             print(f"Processed message {msg_id}: Subject='{subject}', From='{from_addr}'", file=sys.stderr)
             return {
                 'msg_id': msg_id,
@@ -491,7 +643,8 @@ def get_message_details(service, msg_id):
                 'to': to_addr,
                 'date': org_timestamp,
                 'main_content': main_content,
-                'quoted_content': quoted_content
+                'quoted_content': quoted_content,
+                'attachments': attachments
             }
         except HttpError as error:
             print(f'Error downloading message {msg_id} (attempt {attempt + 1}/{MAX_RETRIES}): {error}', file=sys.stderr)
@@ -500,6 +653,120 @@ def get_message_details(service, msg_id):
             else:
                 raise
     return None
+
+def get_message_details_batch(service: Any, msg_ids: List[str], label_name: Optional[str] = None) -> List[Dict[str, str]]:
+    """Fetches and parses details for multiple messages using batch requests.
+
+    Args:
+        service: Gmail API service object.
+        msg_ids: List of message IDs to fetch.
+        label_name: Label name for attachment dir.
+
+    Returns:
+        List of dicts with message details.
+    """
+    if not msg_ids:
+        return []
+
+    batch = service.new_batch_http_request()
+    full_results = {}
+    raw_results = {}
+
+    def full_callback(request_id, response, exception):
+        if exception:
+            logging.error(f"Full get error for {request_id}: {exception}")
+        else:
+            full_results[request_id] = response
+
+    def raw_callback(request_id, response, exception):
+        if exception:
+            logging.error(f"Raw get error for {request_id}: {exception}")
+        else:
+            raw_results[request_id] = response
+
+    for msg_id in msg_ids:
+        batch.add(service.users().messages().get(userId='me', id=msg_id, format='full'), callback=full_callback, request_id=f"full_{msg_id}")
+        batch.add(service.users().messages().get(userId='me', id=msg_id, format='raw'), callback=raw_callback, request_id=f"raw_{msg_id}")
+
+    batch.execute()
+
+    details = []
+    for msg_id in msg_ids:
+        full = full_results.get(f"full_{msg_id}")
+        raw = raw_results.get(f"raw_{msg_id}")
+        if full and raw:
+            # Parse similar to get_message_details
+            message = full
+            raw_message = raw
+            raw_data = base64.urlsafe_b64decode(raw_message['raw'])
+            email_msg = BytesParser(policy=policy.default).parsebytes(raw_data)
+            subject = email_msg['subject'] or 'No Subject'
+            from_addr = email_msg['from'] or 'Unknown Sender'
+            to_addr = email_msg['to'] or 'Unknown Recipient'
+            date = email_msg['date'] or 'Unknown Date'
+            thread_id = message['threadId']
+            org_timestamp = convert_to_org_timestamp(date)
+
+            body = ''
+            if email_msg.is_multipart():
+                for part in email_msg.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get('Content-Disposition'))
+                    if content_type == 'text/plain' and 'attachment' not in content_disposition:
+                        body = part.get_payload(decode=True).decode('utf-8', errors='replace')
+                        break
+                    elif content_type == 'text/html' and 'attachment' not in content_disposition:
+                        html_content = part.get_payload(decode=True).decode('utf-8', errors='replace')
+                        body = html2text.html2text(html_content)
+            else:
+                if email_msg.get_content_type() == 'text/plain':
+                    body = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
+                elif email_msg.get_content_type() == 'text/html':
+                    html_content = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
+                    body = html2text.html2text(html_content)
+
+            body = body.replace('\r\n', '\n').replace('\r', '')
+            body = re.sub(r'\n\s*\n+', '\n\n', body.strip())
+            body = convert_markdown_to_org_links(body)
+
+            main_content, quoted_content = split_quoted_content(body)
+            main_content = escape_org_headings(main_content)
+            quoted_content = escape_org_headings(quoted_content)
+
+            # Download attachments
+            att_dir = ATTACHMENT_DIR.replace("{label}", label_name or "default")
+            attachments = []
+            for part in email_msg.walk():
+                if part.get_content_maintype() == 'multipart':
+                    continue
+                content_disposition = str(part.get('Content-Disposition'))
+                if 'attachment' in content_disposition:
+                    filename = part.get_filename()
+                    if filename:
+                        os.makedirs(att_dir, exist_ok=True)
+                        filepath = os.path.join(att_dir, filename)
+                        try:
+                            with open(filepath, 'wb') as f:
+                                f.write(part.get_payload(decode=True))
+                            attachments.append(filepath)
+                        except Exception as e:
+                            logging.error(f"Failed to save attachment {filename}: {e}")
+
+            details.append({
+                'msg_id': msg_id,
+                'thread_id': thread_id,
+                'subject': subject,
+                'from': from_addr,
+                'to': to_addr,
+                'date': org_timestamp,
+                'main_content': main_content,
+                'quoted_content': quoted_content,
+                'attachments': attachments
+            })
+        else:
+            logging.error(f"Failed to fetch details for message {msg_id}")
+
+    return details
 
 def sync_email_ids(agenda_files, consolidate=False, org_file=None):
     """Finds and optionally consolidates duplicate EMAIL_IDs."""
@@ -538,6 +805,7 @@ def sync_email_ids(agenda_files, consolidate=False, org_file=None):
 
 def download_and_append_label(service, label_name, org_file, date_drawer, agenda_files):
     """Downloads all new messages for a given label and appends them to the org file."""
+    start_time = time.time()
     print(f"\n--- Syncing Label: {label_name} ---", file=sys.stderr)
     
     normalized_label = normalize_label(label_name)
@@ -569,7 +837,10 @@ def download_and_append_label(service, label_name, org_file, date_drawer, agenda
         return
 
     print("Parsing existing email IDs from agenda files...", file=sys.stderr)
+    parse_start = time.time()
     existing_email_ids = parse_org_for_email_ids(agenda_files)
+    parse_end = time.time()
+    print(f"DEBUG: Org parsing took {parse_end - parse_start:.2f} seconds", file=sys.stderr)
     
     print(f"DEBUG: Found {len(messages)} messages via API before filtering.", file=sys.stderr)
     print(f"DEBUG: Found {len(existing_email_ids)} existing messages in Org files.", file=sys.stderr)
@@ -583,30 +854,183 @@ def download_and_append_label(service, label_name, org_file, date_drawer, agenda
 
     print(f"Found {len(new_messages)} new messages to download.", file=sys.stderr)
     threads = defaultdict(list)
-    for i, msg in enumerate(new_messages):
-        print(f"--- Processing message {i+1}/{len(new_messages)} (ID: {msg['id']}) ---", file=sys.stderr)
-        msg_details = get_message_details(service, msg['id'])
-        if msg_details:
-            threads[msg_details['thread_id']].append(msg_details)
+    msg_ids = [msg['id'] for msg in new_messages]
+    print(f"--- Batch fetching {len(msg_ids)} messages ---", file=sys.stderr)
+    msg_details_list = get_message_details_batch(service, msg_ids)
+    for msg_details in msg_details_list:
+        threads[msg_details['thread_id']].append(msg_details)
 
-    new_content = f"* Emails for Label: {label_name}\n"
+    # Get thread locations
+    thread_locations = parse_org_for_thread_locations(agenda_files)
+
+    # Collect content per file
+    file_contents = defaultdict(str)
 
     for thread_id_key, messages_in_thread in threads.items():
         messages_in_thread.sort(key=lambda x: x['date'])
         first_msg = messages_in_thread[0]
         subject = first_msg['subject']
 
-        new_content += f"\n** [[https://mail.google.com/mail/u/0/#inbox/{thread_id_key}][{subject}]]\n"
-        
+        # Determine file for this thread
+        target_file = thread_locations.get(thread_id_key, org_file)
+
+        if target_file == org_file:
+            # New thread, include heading
+            content = f"\n** [[https://mail.google.com/mail/u/0/#inbox/{thread_id_key}][{subject}]]\n"
+        else:
+            # Existing thread, no heading
+            content = ""
+
         for msg in messages_in_thread:
             is_reply = msg != first_msg
-            if is_reply:
-                 new_content += f"*** Re: {msg['subject']}\n"
+            if is_reply or target_file != org_file:
+                content += f"*** Re: {msg['subject']}\n"
             
+            content += f":PROPERTIES:\n"
+            content += f":EMAIL_ID: {msg['msg_id']}\n"
+            content += f":THREAD_ID: {msg['thread_id']}\n"
+            content += f":LABEL: {label_name}\n"
+            content += f":FROM: {msg['from']}\n"
+            content += f":TO: {msg['to']}\n"
+            content += f":SUBJECT: {msg['subject']}\n"
+            content += f":END:\n:{date_drawer}:\n"
+            content += f"{msg['date']}\n"
+            content += f":END:\n\n"
+            content += f"{msg['main_content']}\n\n"
+            if msg['quoted_content']:
+                content += f"**** Quoted Content\n:QUOTED:\n{msg['quoted_content']}\n:END:\n\n"
+            if msg.get('attachments'):
+                content += "** Attachments\n"
+                for att in msg['attachments']:
+                    rel_path = os.path.relpath(att, os.path.dirname(target_file))
+                    content += f"- [[file:{rel_path}][{os.path.basename(att)}]] ([[https://mail.google.com/mail/u/0/#inbox/{msg['msg_id']}][view in Gmail]])\n"
+                content += "\n"
+
+        file_contents[target_file] += content
+
+    for thread_id_key, messages_in_thread in threads.items():
+        target_file = thread_locations.get(thread_id_key, org_file)
+        file_path_expanded = os.path.expanduser(target_file)
+        os.makedirs(os.path.dirname(file_path_expanded), exist_ok=True)
+
+        messages_in_thread.sort(key=lambda x: x['date'])
+        first_msg = messages_in_thread[0]
+        subject = first_msg['subject']
+
+        if target_file == org_file:
+            # New thread, append with heading
+            content = f"\n** [[https://mail.google.com/mail/u/0/#inbox/{thread_id_key}][{subject}]]\n"
+        else:
+            # Existing thread, insert without heading
+            content = ""
+
+        for msg in messages_in_thread:
+            is_reply = msg != first_msg
+            if is_reply or target_file != org_file:
+                content += f"*** Re: {msg['subject']}\n"
+            
+            content += f":PROPERTIES:\n"
+            content += f":EMAIL_ID: {msg['msg_id']}\n"
+            content += f":THREAD_ID: {msg['thread_id']}\n"
+            content += f":LABEL: {label_name}\n"
+            content += f":FROM: {msg['from']}\n"
+            content += f":TO: {msg['to']}\n"
+            content += f":SUBJECT: {msg['subject']}\n"
+            content += f":END:\n:{date_drawer}:\n"
+            content += f"{msg['date']}\n"
+            content += f":END:\n\n"
+            content += f"{msg['main_content']}\n\n"
+            if msg['quoted_content']:
+                content += f"**** Quoted Content\n:QUOTED:\n{msg['quoted_content']}\n:END:\n\n"
+            if msg.get('attachments'):
+                content += "** Attachments\n"
+                for att in msg['attachments']:
+                    rel_path = os.path.relpath(att, os.path.dirname(target_file))
+                    content += f"- [[file:{rel_path}][{os.path.basename(att)}]] ([[https://mail.google.com/mail/u/0/#inbox/{msg['msg_id']}][view in Gmail]])\n"
+                content += "\n"
+
+        if target_file == org_file:
+            print(f"Writing to {file_path_expanded}", file=sys.stderr)
+            with open(file_path_expanded, 'a', encoding='utf-8') as f:
+                f.write(f"* Emails for Label: {label_name}\n" + content)
+            print(f"Successfully appended messages to {file_path_expanded}", file=sys.stderr)
+        else:
+            print(f"Inserting into {file_path_expanded}", file=sys.stderr)
+            insert_under_thread(file_path_expanded, thread_id_key, content)
+            print(f"Successfully inserted messages into {file_path_expanded}", file=sys.stderr)
+    
+    end_time = time.time()
+    print(f"DEBUG: Total time for download_and_append_label: {end_time - start_time:.2f} seconds", file=sys.stderr)
+
+def handle_defer(service, msg_id, defer_time):
+    defer_message(service, msg_id, defer_time)
+
+def handle_reply(service, msg_id, message_body, to_recipients, cc_recipients):
+    reply_to_message(service, msg_id, message_body, to_recipients, cc_recipients)
+
+def handle_delegate(service, msg_id, recipient, note):
+    delegate_message(service, msg_id, recipient, note)
+
+def handle_bulk_move_labels(service, old_label, new_label):
+    bulk_move_labels(service, old_label, new_label)
+
+def handle_modify_thread_labels(service, thread_id, old_label, new_label):
+    modify_thread_labels(service, thread_id, old_label, new_label)
+
+def handle_sync_labels(service, agenda_files, org_file, date_drawer, ignore_labels):
+    labels_to_sync = parse_org_for_labels_from_properties(agenda_files)
+    print(f"Found {len(labels_to_sync)} labels to sync from properties: {labels_to_sync}", file=sys.stderr)
+    
+    if ignore_labels:
+        filtered_labels = []
+        for label in labels_to_sync:
+            if not any(re.search(pattern, label) for pattern in ignore_labels):
+                filtered_labels.append(label)
+        print(f"Ignoring {len(labels_to_sync) - len(filtered_labels)} labels. Syncing {len(filtered_labels)} labels.", file=sys.stderr)
+        labels_to_sync = filtered_labels
+
+    for label in labels_to_sync:
+        download_and_append_label(service, label, org_file, date_drawer, agenda_files)
+
+def handle_sync_email_ids(agenda_files, consolidate, org_file):
+    sync_email_ids(agenda_files, consolidate, org_file)
+
+def handle_delete_message(service, delete_message_id):
+    delete_message(service, delete_message_id)
+
+def handle_delete_thread(service, delete_thread_id):
+    delete_thread(service, delete_thread_id)
+
+def handle_download_by_label(service, label_name, org_file, date_drawer, agenda_files):
+    download_and_append_label(service, label_name, org_file, date_drawer, agenda_files)
+
+def handle_download_thread(service, thread_id, org_file, date_drawer, agenda_files):
+    messages = list_messages(service, thread_id=thread_id)
+    if not messages:
+        print(f"No messages found for thread.", file=sys.stderr)
+        return
+
+    existing_email_ids = parse_org_for_email_ids(agenda_files)
+    new_messages = [msg for msg in messages if msg['id'] not in existing_email_ids]
+
+    if not new_messages:
+        print(f"All messages for thread are already downloaded.", file=sys.stderr)
+        return
+
+    threads = defaultdict(list)
+    for msg in new_messages:
+        msg_details = get_message_details(service, msg['id'])
+        if msg_details:
+            threads[msg_details['thread_id']].append(msg_details)
+
+    new_content = ""
+    for _, messages_in_thread in threads.items():
+        messages_in_thread.sort(key=lambda x: x['date'])
+        for msg in messages_in_thread:
+            new_content += f"*** Re: {msg['subject']}\n"
             new_content += f":PROPERTIES:\n"
             new_content += f":EMAIL_ID: {msg['msg_id']}\n"
             new_content += f":THREAD_ID: {msg['thread_id']}\n"
-            new_content += f":LABEL: {label_name}\n"
             new_content += f":FROM: {msg['from']}\n"
             new_content += f":TO: {msg['to']}\n"
             new_content += f":SUBJECT: {msg['subject']}\n"
@@ -616,130 +1040,82 @@ def download_and_append_label(service, label_name, org_file, date_drawer, agenda
             new_content += f"{msg['main_content']}\n\n"
             if msg['quoted_content']:
                 new_content += f"**** Quoted Content\n:QUOTED:\n{msg['quoted_content']}\n:END:\n\n"
-
+            if msg.get('attachments'):
+                new_content += "** Attachments\n"
+                for att in msg['attachments']:
+                    rel_path = os.path.relpath(att, os.path.dirname(org_file))
+                    new_content += f"- [[file:{rel_path}][{os.path.basename(att)}]] ([[https://mail.google.com/mail/u/0/#inbox/{msg['msg_id']}][view in Gmail]])\n"
+                new_content += "\n"
+    
     if new_content:
-        org_file_path = os.path.expanduser(org_file)
-        os.makedirs(os.path.dirname(org_file_path), exist_ok=True)
-        print(f"Writing to {org_file_path}", file=sys.stderr)
-        with open(org_file_path, 'a', encoding='utf-8') as f:
-            f.write(new_content)
-        print(f"Successfully appended {len(new_messages)} new messages to {org_file_path}", file=sys.stderr)
+        if org_file:
+            # This case is now handled by Emacs Lisp which captures stdout
+            print("---ORG_CONTENT_START---")
+            print(new_content.strip())
+            print("---ORG_CONTENT_END---")
+        else:
+            print("---ORG_CONTENT_START---")
+            print(new_content.strip())
+            print("---ORG_CONTENT_END---")
 
 def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, thread_id=None, 
-         do_sync_email_ids=False, consolidate=False, credentials=None, 
-         delete_message_id=None, delete_thread_id=None, sync_labels=False,
-         modify_thread_labels_args=None, bulk_move_labels_args=None,
-         ignore_labels=None, defer_args=None, reply_args=None, delegate_args=None):
+          do_sync_email_ids=False, consolidate=False, credentials=None, 
+          delete_message_id=None, delete_thread_id=None, sync_labels=False,
+          modify_thread_labels_args=None, bulk_move_labels_args=None,
+          ignore_labels=None, defer_args=None, reply_args=None, delegate_args=None):
     """Main function to drive the script's logic."""
     print(f"Starting main with: label='{label_name}', thread_id='{thread_id}', sync={do_sync_email_ids}", file=sys.stderr)
     
-    service = get_gmail_service(credentials)
-    print("Gmail service initialized successfully.", file=sys.stderr)
+    try:
+        service = get_gmail_service(credentials)
+        print("Gmail service initialized successfully.", file=sys.stderr)
 
-    if defer_args:
-        msg_id, defer_time = defer_args
-        defer_message(service, msg_id, defer_time)
-        return
-    
-    if reply_args:
-        msg_id, message_body, to_recipients, cc_recipients = reply_args
-        reply_to_message(service, msg_id, message_body, to_recipients, cc_recipients)
-        return
-
-    if delegate_args:
-        msg_id, recipient, note = delegate_args
-        delegate_message(service, msg_id, recipient, note)
-        return
-
-    if bulk_move_labels_args:
-        old_label, new_label = bulk_move_labels_args
-        bulk_move_labels(service, old_label, new_label)
-        return
-
-    if modify_thread_labels_args:
-        thread_id, old_label, new_label = modify_thread_labels_args
-        modify_thread_labels(service, thread_id, old_label, new_label)
-        return
-
-    if sync_labels:
-        labels_to_sync = parse_org_for_labels_from_properties(agenda_files)
-        print(f"Found {len(labels_to_sync)} labels to sync from properties: {labels_to_sync}", file=sys.stderr)
+        if defer_args:
+            handle_defer(service, *defer_args)
+            return
         
-        if ignore_labels:
-            filtered_labels = []
-            for label in labels_to_sync:
-                if not any(re.search(pattern, label) for pattern in ignore_labels):
-                    filtered_labels.append(label)
-            print(f"Ignoring {len(labels_to_sync) - len(filtered_labels)} labels. Syncing {len(filtered_labels)} labels.", file=sys.stderr)
-            labels_to_sync = filtered_labels
-
-        for label in labels_to_sync:
-            download_and_append_label(service, label, org_file, date_drawer, agenda_files)
-        return
-
-    if do_sync_email_ids:
-        sync_email_ids(agenda_files, consolidate, org_file)
-        return
-    
-    if delete_message_id:
-        delete_message(service, delete_message_id)
-        return
-    if delete_thread_id:
-        delete_thread(service, delete_thread_id)
-        return
-
-    if label_name:
-        download_and_append_label(service, label_name, org_file, date_drawer, agenda_files)
-        return
-
-    # Handle thread-id download
-    if thread_id:
-        messages = list_messages(service, thread_id=thread_id)
-        if not messages:
-            print(f"No messages found for thread.", file=sys.stderr)
+        if reply_args:
+            handle_reply(service, *reply_args)
             return
 
-        existing_email_ids = parse_org_for_email_ids(agenda_files)
-        new_messages = [msg for msg in messages if msg['id'] not in existing_email_ids]
-
-        if not new_messages:
-            print(f"All messages for thread are already downloaded.", file=sys.stderr)
+        if delegate_args:
+            handle_delegate(service, *delegate_args)
             return
 
-        threads = defaultdict(list)
-        for msg in new_messages:
-            msg_details = get_message_details(service, msg['id'])
-            if msg_details:
-                threads[msg_details['thread_id']].append(msg_details)
+        if bulk_move_labels_args:
+            handle_bulk_move_labels(service, *bulk_move_labels_args)
+            return
 
-        new_content = ""
-        for _, messages_in_thread in threads.items():
-            messages_in_thread.sort(key=lambda x: x['date'])
-            for msg in messages_in_thread:
-                new_content += f"*** Re: {msg['subject']}\n"
-                new_content += f":PROPERTIES:\n"
-                new_content += f":EMAIL_ID: {msg['msg_id']}\n"
-                new_content += f":THREAD_ID: {msg['thread_id']}\n"
-                new_content += f":FROM: {msg['from']}\n"
-                new_content += f":TO: {msg['to']}\n"
-                new_content += f":SUBJECT: {msg['subject']}\n"
-                new_content += f":END:\n:{date_drawer}:\n"
-                new_content += f"{msg['date']}\n"
-                new_content += f":END:\n\n"
-                new_content += f"{msg['main_content']}\n\n"
-                if msg['quoted_content']:
-                    new_content += f"**** Quoted Content\n:QUOTED:\n{msg['quoted_content']}\n:END:\n\n"
+        if modify_thread_labels_args:
+            handle_modify_thread_labels(service, *modify_thread_labels_args)
+            return
+
+        if sync_labels:
+            handle_sync_labels(service, agenda_files, org_file, date_drawer, ignore_labels)
+            return
+
+        if do_sync_email_ids:
+            handle_sync_email_ids(agenda_files, consolidate, org_file)
+            return
         
-        if new_content:
-            if org_file:
-                # This case is now handled by Emacs Lisp which captures stdout
-                print("---ORG_CONTENT_START---")
-                print(new_content.strip())
-                print("---ORG_CONTENT_END---")
-            else:
-                print("---ORG_CONTENT_START---")
-                print(new_content.strip())
-                print("---ORG_CONTENT_END---")
+        if delete_message_id:
+            handle_delete_message(service, delete_message_id)
+            return
+        if delete_thread_id:
+            handle_delete_thread(service, delete_thread_id)
+            return
+
+        if label_name:
+            handle_download_by_label(service, label_name, org_file, date_drawer, agenda_files)
+            return
+
+        # Handle thread-id download
+        if thread_id:
+            handle_download_thread(service, thread_id, org_file, date_drawer, agenda_files)
+    except Exception as e:
+        logging.error(f"Error in main: {e}")
+        print(f"An error occurred: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
