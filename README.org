@@ -1,39 +1,99 @@
-#+TITLE: org-gmail: Gmail Meets Org Mode (and they actually get along)
+#+TITLE: org-gmail v2.0: Gmail Triage Inside Emacs
 
 * Why org-gmail?
 
-You love Org Mode. You tolerate email. What if they could work together?
+You love Org Mode. You tolerate email. What if triage happened where real work does?
 
 ** The Problem
 
 - You already have a great email client (Gmail's web UI is fast)
 - You already have a great task/knowledge system (Org Mode)
-- But important emails live in one place, and your real work happens in another
-- Existing solutions (Gnus, mu4e, notmuch) want to BE your email client—500+ lines of config, all or nothing
+- But triaging email means context-switching out of Org every time
+- Existing solutions (Gnus, mu4e, notmuch) want to BE your email client — 500+ lines of config, all or nothing
 
 ** The Solution
 
-=org-gmail= is a *bridge*, not a replacement. It lets you:
+=org-gmail= is a *bridge*, not a replacement.
 
-1. *Triage in Gmail* — Use the fast web UI for the easy stuff
-2. *Process in Org Mode* — Pull important threads where you do real work
-3. *Two-way sync* — Changes flow both directions
+- *v1.x:* Pull threads into Org by Gmail label. Process them there.
+- *v2.0:* Open a live triage feed inside Emacs. Flag emails with 4D actions (dired-style). Press =x= to execute them all — captures go to Org, Gmail state syncs automatically.
 
-Think of it as =org-capture= for email, but bidirectional.
+You stay in Emacs. Email stays in Gmail. They stay in sync.
 
 ** Who Is This For?
 
-- GTD practitioners who want email context in their weekly reviews
+- GTD practitioners who want to process email without leaving Org
 - P.A.R.A. users who want Gmail labels mirroring their folder structure
-- Anyone who thinks "I wish this email thread was in my Org file"
+- Anyone running multiple Gmail accounts who wants a unified triage view
 
 #+begin_quote
-org-gmail: For people who like Org Mode more than email (but still have to deal with email).
+org-gmail v2.0: Triage email like you manage files in dired.
 #+end_quote
 
-* Introduction
+* What's New in v2.0
 
-org-gmail is a package for Emacs that allows you to fetch entire Gmail threads or individual messages and save them as entries in your Org mode files. It uses the Gmail API via a companion Python script.
+** Live Triage Feed
+
+=org-gmail-feed= opens a live inbox view — no labels, no downloads needed. Emails appear as browsable entries. Navigate with =n=/=p=, open full detail with =RET= (or split view with =TAB=).
+
+** 4Ds Flagging (dired-style)
+
+Flag entries with single-key actions, execute them all at once with =x=:
+
+| Key | Flag | What happens on =x=                                        |
+|-----+------+------------------------------------------------------------|
+| =c= | =C= (green)  | Capture as TODO; prompt for task note                |
+| =e= | =E= (cyan)   | Capture with SCHEDULED date; prompt for task note    |
+| =d= | =D= (red)    | Trash in Gmail                                       |
+| =a= | =a= (gray)   | Archive in Gmail (mark-read + remove from inbox)     |
+| =A= | =A= (gold)   | Delegate: forward + capture; prompt for recipient    |
+| =f= | =F= (blue)   | Refile: pick target now, capture + refile on =x=    |
+| =r= | —            | Reply immediately (not a deferred flag)              |
+| =u= | —            | Unflag the entry                                     |
+
+Pressing =x= shows a summary ("Execute 3 actions: 2 Do/capture, 1 Delete?") before proceeding.
+
+** Gmail State Sync
+
+Every 4D action syncs state back to Gmail automatically — no separate step:
+
+| Action   | Gmail effect                              |
+|----------+-------------------------------------------|
+| Do / Defer / Refile | mark-read + archive             |
+| Delete   | move to trash                             |
+| Archive  | mark-read + remove from inbox             |
+| Delegate | star + mark-read + archive; forward email |
+
+** Task Notes
+
+When flagging Do (=c=), Defer (=e=), or Delegate (=A=), you are prompted for an optional note. If you write one, it becomes the =* TODO= heading and the email drops to a sub-heading underneath:
+
+#+BEGIN_SRC org
+,* TODO Review pricing proposal   :email:
+  SCHEDULED: <2026-05-15 Thu>
+  :PROPERTIES:
+  :THREAD_ID: 189abc...
+  :FROM:      vendor@company.com
+  :END:
+
+,** Q2 Pricing Update
+   From: vendor@company.com
+   https://mail.google.com/...
+
+   Here are the updated rates...
+#+END_SRC
+
+Leave the note blank to use the email subject as the heading (v1.x behavior).
+
+** Integrated Multi-Account Inbox
+
+=org-gmail-feed-all= fetches all configured accounts in parallel and shows them in one buffer. Each email is labeled with a colored account badge (=‹bala›=, =‹niki›=, =‹spirelia›=). Press =l= to filter to one or more accounts without re-fetching.
+
+All triage actions (=c=, =e=, =d=, =a=, =A=, =f=, =x=, =o=, =RET=, =TAB=) use the per-email account automatically.
+
+** Full Email Body in Detail View
+
+=RET= (full window) or =TAB= (split) open a detail view. The body is fetched asynchronously while headers show immediately. Quoted reply text is displayed with a =│= prefix in a shadow face. URLs in the body are clickable.
 
 * Screenshot
 
@@ -41,311 +101,234 @@ org-gmail is a package for Emacs that allows you to fetch entire Gmail threads o
 
 * Features
 
-- Create and delete labels in Gmail.
-- Download all emails with a specific label, chosen from a list fetched directly from Gmail.
-- Sync all previously downloaded labels to fetch new emails. This works by finding all `:LABEL:` properties in your agenda files, so you can refile and reorganize your emails without breaking the sync. You can also configure a list of labels to ignore during this process.
-- Edit a thread's label at point, updating it in Gmail and across all your Org files.
-- Bulk move all threads from one label to another. If the destination label doesn't exist, it will be created for you. This updates both Gmail and all corresponding `:LABEL:` properties in your Org files.
-- Download new messages for a specific thread.
-- Insert new messages directly after the existing thread in your Org file.
-- Move messages or entire threads to the trash in Gmail.
-- Defer (snooze) emails using natural language (e.g., "next monday"). /Note: Gmail API snooze support is limited; see Known Issues./
-- Reply to and delegate (forward) emails directly from Emacs, with full control over recipients. Sent replies are automatically inserted into the Org thread.
-- Create actionable sub-tasks for emails that will appear in your agenda.
-- Download and save email attachments to a configurable directory, with Org links for local access and options to view in Gmail.
-- Smart syncing: New messages in existing threads are appended to the thread's current Org file location, not the default inbox.
-- Automatic reply insertion: Sent replies appear immediately in the Org thread.
+** Core (v1.x, still supported)
 
-* Optional Features (with suggested configuration)
+- Create, delete, and bulk-move Gmail labels
+- Download all emails with a specific label into Org files
+- Sync previously-downloaded labels to fetch new messages
+- Smart append: new messages go to the thread's current Org location, not the inbox
+- Move messages/threads to trash
+- Reply to and forward (delegate) emails from Emacs
+- Download attachments with Org links
 
-- Create and insert internal links (`org-gmail:`) between email entries (requires `org-ql`).
-- A Hydra menu for quick access to all commands (requires `hydra`).
+** Feed / Triage (v2.0)
+
+- Live triage feed with dired-style 4D flagging
+- Batch execute: all flagged actions processed together with Gmail sync
+- Integrated multi-account inbox with per-email account badges
+- Account filter (=l=) for the integrated view
+- Task note prompt on capture: note = heading, email = sub-heading
+- Async full-body detail view with quoted-text formatting and clickable URLs
+- Capture cache: already-captured threads shown in shadow face
+- =s= saves all Org buffers; =g= refreshes the feed; =o= opens thread in browser
 
 * Installation
 
 ** 1. Python Dependencies
 
-This package relies on a Python script with a few dependencies. You can install them using pip:
-
 #+BEGIN_SRC sh
-pip install --upgrade google-api-python-client google-auth-httplib2 google-auth-oauthlib html2text pytz
+pip install --upgrade google-api-python-client google-auth-httplib2 \
+    google-auth-oauthlib html2text pytz
 #+END_SRC
-
-**Note on the `snooze` feature:** The Gmail API does not officially expose a public snooze endpoint. The =defer= command may not work as expected. See [[https://issuetracker.google.com/issues/109952618][this feature request]] for updates from Google.
 
 ** 2. Gmail API Credentials
 
-You'll need to enable the Gmail API and download a `credentials.json` file.
+One set of OAuth client credentials works for all your Google accounts.
 
-1. Go to the [[https://console.developers.google.com/][Google Cloud Console]].
-2. Create a new project.
-3. Enable the "Gmail API" for your project.
-4. Create credentials for a "Desktop app".
-5. Download the `credentials.json` file.
+1. Go to [[https://console.developers.google.com/][Google Cloud Console]]
+2. Create a project → enable the Gmail API
+3. Create credentials for a "Desktop app"
+4. Download =credentials.json=
+
+For a second account, copy the file under a different name:
+
+#+BEGIN_SRC sh
+cp ~/.config/emacs/credentials.json ~/.config/emacs/work-credentials.json
+#+END_SRC
+
+First-time auth for each account is a one-time browser flow:
+
+#+BEGIN_SRC sh
+python3 ~/bin/gmail_label_manager.py --fetch-recent 7 \
+  --credentials ~/.config/emacs/work-credentials.json
+# A browser tab opens — log in as the work account.
+# Token saved as work-credentials-token.json. Browser not needed again.
+#+END_SRC
 
 ** 3. Emacs Package Installation
 
-This package is designed to be installed with `straight.el`. Add the following to your Emacs configuration. Make sure to replace `"your-username/your-repo-name"` with your actual GitHub repository details.
-
 #+BEGIN_SRC emacs-lisp
-  (use-package org-gmail
-    :straight (org-gmail :type git :host github :repo "balaramadurai/org-gmail")
-    :commands (org-gmail-create-label
-               org-gmail-delete-label
-               org-gmail-download-by-label
-               org-gmail-download-at-point
-               org-gmail-sync-labels
-               org-gmail-sync-email-ids
-               org-gmail-trash-at-point
-               org-gmail-defer-at-point
-               org-gmail-reply-at-point
-               org-gmail-delegate-at-point
-               org-gmail-copy-link-at-point
-               org-gmail-insert-link
-               org-gmail-edit-label-at-point
-               org-gmail-bulk-move-labels
-               org-gmail-add-action-at-point)
-    :config
-    (setq org-gmail-org-file "~/Documents/0Inbox/index.org")
-    (setq org-gmail-credentials-file "~/path/to/your/credentials.json")
-    (setq org-gmail-python-script "gmail_label_manager.py")
-    (setq org-gmail-date-drawer "org-gmail")
-    (setq org-gmail-process-timeout 300)
-     ;; Optional: Configure labels to ignore during sync
-     (setq org-gmail-sync-ignore-labels '("^4Archives/" "^3Resources/"))
-     )
- #+END_SRC
+(use-package org-gmail
+  :straight (org-gmail :type git :host github :repo "balaramadurai/org-gmail")
+  :commands (org-gmail-feed org-gmail-feed-all
+             org-gmail-sync-threads org-gmail-open-at-point
+             org-gmail-download-by-label org-gmail-sync-labels
+             org-gmail-create-label org-gmail-bulk-move-labels)
+  :custom
+  (org-gmail-org-file "~/Documents/0Inbox/index.org")
+  (org-gmail-python-script "~/bin/gmail_label_manager.py")
+  (org-gmail-date-drawer "org-gmail")
+  (org-gmail-feed-days 7)
+  (org-gmail-sync-ignore-labels '("^4Archives/" "^3Resources/"))
+  ;; Multi-account setup
+  (org-gmail-accounts
+   '((:name "personal"
+      :address "you@gmail.com"
+      :credentials "~/.config/emacs/credentials.json"
+      :default t)
+     (:name "work"
+      :address "you@company.com"
+      :credentials "~/.config/emacs/work-credentials.json"))))
+#+END_SRC
 
- ** Python Configuration
+** 4. Python Configuration (optional)
 
- Create a ~config.json~ file in the same directory as ~gmail_label_manager.py~ with settings like:
+Create =config.json= in the same directory as =gmail_label_manager.py=:
 
- #+BEGIN_SRC json
- {
-   "api_timeout": 120,
-   "cache_path": ".label_cache.json",
-   "max_retries": 5,
-   "attachment_dir": "attachments/{label}"
- }
- #+END_SRC
-
- The ~{label}~ placeholder in ~attachment_dir~ will be replaced with the label name (e.g., ~attachments/Work/~ for Work label).
+#+BEGIN_SRC json
+{
+  "api_timeout": 120,
+  "cache_path": ".label_cache.json",
+  "max_retries": 5,
+  "attachment_dir": "attachments/{label}"
+}
+#+END_SRC
 
 * Usage
 
-You can call the functions individually or use the optional Hydra menu for quick access.
+** Triage Feed (v2.0 workflow)
 
-** Main Commands:
-- `M-x org-gmail-create-label`: Create a new label in Gmail.
-- `M-x org-gmail-delete-label`: Delete a label from Gmail.
-- `M-x org-gmail-download-by-label`: Fetches a list of your Gmail labels and prompts you to select one to download.
-- `M-x org-gmail-sync-labels`: Finds all labels you have previously downloaded (by looking for `:LABEL:` properties) and fetches new emails for them.
-- `M-x org-gmail-edit-label-at-point`: Move the thread at point to a new label by editing the current label name.
-- `M-x org-gmail-bulk-move-labels`: Move all threads from one label to another.
-- `M-x org-gmail-download-at-point`: Download new messages for the thread at point.
-- `M-x org-gmail-sync-email-ids`: Sync and find duplicate email IDs.
-- `M-x org-gmail-trash-at-point`: Move the email or thread at point to the trash.
-- `M-x org-gmail-add-action-at-point`: Create an actionable sub-task for the email at point.
-- `M-x org-gmail-defer-at-point`: Defer (snooze) an email in Gmail.
-- `M-x org-gmail-reply-at-point`: Reply to an email.
-- `M-x org-gmail-delegate-at-point`: Delegate (forward) an email.
+The primary workflow in v2.0:
 
-** Link Commands (requires `org-ql`):
-- `M-x org-gmail-copy-link-at-point`: Copies a `org-gmail:` link for the email at point.
-- `M-x org-gmail-insert-link`: Inserts a `org-gmail:` link to an email you select from a list.
+#+BEGIN_SRC
+M-x org-gmail-feed       — single account (prompts if multiple configured)
+M-x org-gmail-feed-all   — integrated inbox, all accounts
+#+END_SRC
 
-* Suggested Configuration (Optional)
+Inside the feed:
 
-If you have the `hydra` and `org-ql` packages installed, you can add the following to your configuration for an enhanced experience.
+#+BEGIN_SRC
+Navigation:   n / p         next / previous email
+              RET           full-window detail view
+              TAB           split-window detail view
+              o             open thread in browser
+
+Flagging:     c             Do    → capture as TODO (prompts for note)
+              e             dEfer → capture with SCHEDULED date + note
+              d             Delete
+              a             archive (mark-read + remove from inbox)
+              A             Delegate (forward + capture; prompts recipient + note)
+              f             reFile (pick target now, execute later)
+              r             Reply immediately
+              u             unflag
+
+Execute:      x             confirm then run all flagged actions + sync Gmail
+
+Integrated:   l             filter by account(s) in org-gmail-feed-all
+
+Utility:      s             save all Org buffers
+              g             refresh feed
+              ?             show key help
+              q             quit
+#+END_SRC
 
 ** Hydra Menu
 
-This provides a convenient pop-up menu with single-key shortcuts for all `org-gmail` commands.
+With =hydra= installed:
 
 #+BEGIN_SRC emacs-lisp
-(use-package hydra)
 (defhydra org-gmail-hydra (:color blue :hint nil)
   "
-^Org-Gmail^
-----------------------------------------------------------------
-_d_: Download by label      _e_: Edit label at point     _l_: Copy link
-_D_: Download at point      _b_: Bulk move labels          _L_: Insert link
-_s_: Sync labels            _c_: Create label              _x_: Delete label
-_S_: Sync email IDs         _t_: Trash at point            _a_: Add action
-_r_: Reply                  _f_: Delegate (forward)      _z_: Defer (snooze)
+^Gmail Feed^                    ^Legacy^
+────────────────────────────────────────────────
+_f_: Feed (single account)      _d_: Download by label
+_a_: Feed (all accounts)        _s_: Sync labels
+_t_: Sync thread replies        _c_: Create label
+_o_: Open thread in browser     _b_: Bulk move labels
+_r_: Rebuild routing table
 _q_: Quit
 "
+  ("f" org-gmail-feed)
+  ("a" org-gmail-feed-all)
+  ("t" org-gmail-sync-threads)
+  ("o" org-gmail-open-at-point)
+  ("r" org-gmail--build-routing-table)
   ("d" org-gmail-download-by-label)
-  ("D" org-gmail-download-at-point)
   ("s" org-gmail-sync-labels)
-  ("S" org-gmail-sync-email-ids)
-  ("e" org-gmail-edit-label-at-point)
-  ("b" org-gmail-bulk-move-labels)
   ("c" org-gmail-create-label)
-  ("x" org-gmail-delete-label)
-  ("t" org-gmail-trash-at-point)
-  ("l" org-gmail-copy-link-at-point)
-  ("L" org-gmail-insert-link)
-  ("a" org-gmail-add-action-at-point)
-  ("r" org-gmail-reply-at-point)
-  ("f" org-gmail-delegate-at-point)
-  ("z" org-gmail-defer-at-point)
-  ("q" nil "quit"))
-
-(defun org-gmail-hydra ()
-  "Show the org-gmail hydra menu."
-  (interactive)
-  (org-gmail-hydra/body))
+  ("b" org-gmail-bulk-move-labels)
+  ("q" nil))
 #+END_SRC
 
-** Custom Links
+** Routing Table (P.A.R.A. / project routing)
 
-This enables `org-gmail:` links, allowing you to jump directly to an email entry from anywhere in your Org files.
+Emails are routed to the right Org file by sender domain. Add =:EMAIL_DOMAINS:= properties to project headings:
 
-#+BEGIN_SRC emacs-lisp
-(use-package org-ql
-  :config
-  (defun org-gmail-open-link (email-id)
-    "Open the Org entry corresponding to the EMAIL-ID."
-    (let ((results (org-ql-select (org-agenda-files)
-                     `(property "EMAIL_ID" ,email-id)
-                     :action 'markers)))
-      (if (not results)
-          (message "No email found with ID: %s" email-id)
-        (let* ((marker (car results))
-               (buffer (marker-buffer marker))
-               (pos (marker-position marker)))
-          (switch-to-buffer buffer)
-          (goto-char pos)))))
-  (org-link-set-parameters "org-gmail" :follow #'org-gmail-open-link))
+#+BEGIN_SRC org
+,* PROJECT Client Website
+  :PROPERTIES:
+  :EMAIL_DOMAINS: clientdomain.com vendor.io
+  :END:
 #+END_SRC
 
-* Use Cases
+Run =M-x org-gmail--build-routing-table= to rebuild. Captured emails from =clientdomain.com= addresses will land under a =** Emails= sub-heading inside that project automatically.
 
-** Getting Things Done (GTD)
+** Legacy Label Workflow (v1.x)
 
-`org-gmail` is a great fit for a GTD workflow. You can process your Gmail inbox and convert actionable emails into Org Mode tasks.
+Still fully supported:
 
-1.  **Process Inbox:** In Gmail, apply a label like `ToProcess` to emails that require action.
-2.  **Download:** Use `M-x org-gmail-download-by-label` to pull all emails with the `ToProcess` label into your `index.org` file.
-3.  **Refile:** Go through the new entries in your inbox file. For each one, you can:
-    -   **Delete:** If it's not needed, use `M-x org-gmail-trash-at-point`.
-    -   **Defer:** If it's not actionable now, use `M-x org-gmail-defer-at-point` to snooze it.
-    -   **Do (Reply):** If it takes less than 2 minutes, reply directly with `M-x org-gmail-reply-at-point`.
-    -   **Delegate:** If it's for someone else, forward it with `M-x org-gmail-delegate-at-point`.
-    -   **To-Do:** If it's a larger task, use `M-x org-gmail-add-action-at-point` to create a `TODO` sub-task that will appear in your agenda.
-
-** P.A.R.A. Method
-
-The P.A.R.A. (Projects, Areas, Resources, Archives) method is also well-supported.
-
-1.  **Labeling:** In Gmail, use labels that match your P.A.R.A. structure (e.g., `1Projects/ClientWebsite`, `2Areas/Finances`, `3Resources/Emacs`).
-2.  **Download:** Use `M-x org-gmail-download-by-label` to download emails related to a specific project or area.
-3.  **Lifecycle Management:** When a project is finished, use `M-x org-gmail-bulk-move-labels` to move all threads from `1Projects/ClientWebsite` to `4Archives/2025/ClientWebsite`. This automatically updates both Gmail and all the `:LABEL:` properties in your Org files, keeping everything in sync.
+- =M-x org-gmail-download-by-label= — fetch all emails with a Gmail label
+- =M-x org-gmail-sync-labels= — pull new messages for all previously-downloaded labels
+- =M-x org-gmail-bulk-move-labels= — move all threads from one label to another (updates Gmail + Org)
 
 * Comparison with Other Emacs Mail Clients
 
-** Gnus, mu4e, notmuch
+| Feature            | Gnus / mu4e / notmuch | org-gmail v2.0          |
+|--------------------+-----------------------+-------------------------|
+| Goal               | Full email client     | Gmail ↔ Org triage bridge |
+| Config             | 500+ lines            | ~20 lines               |
+| Gmail labels       | Partial               | Native                  |
+| Offline            | Yes                   | No (API required)       |
+| All email          | Yes                   | Selected threads        |
+| Multi-account view | Varies                | Integrated inbox        |
+| Org integration    | Links only            | Full properties + sync  |
+| Gmail state sync   | Manual                | Automatic on triage     |
 
-These are powerful, full-featured email clients inside Emacs. They are designed to manage your entire email workflow: reading, writing, sending, and organizing.
-
-*Short answer:* They're amazing. Use them if they work for you.
-
-*The honest answer:*
-- They want to BE your email client
-- They require ~500 lines of config (minimum)
-- They struggle with Gmail's labels and threading
-- They make you choose: "All in Emacs" or nothing
-
-** org-gmail
-
-=org-gmail= says: "Why not both?"
-
-It is not a replacement for a full mail client. Instead, it's a *bridge* for integrating your most important emails into your Org Mode knowledge base.
-
-| Feature | Gnus/mu4e/notmuch | org-gmail |
-|---------+-------------------+-----------|
-| Goal | Full email client | Gmail ↔ Org bridge |
-| Config | 500+ lines | ~20 lines |
-| Gmail labels | Partial support | Native support |
-| Offline | Yes | No (API required) |
-| All email | Yes | Selected threads |
-| Org integration | Links only | Full properties, sync |
-
-** What org-gmail Is NOT
-
-- A full email client
-- A replacement for Gnus/mu4e/notmuch
-- A way to read ALL your email in Emacs
-- Offline-capable
-
-** What org-gmail IS
-
-- A bridge between Gmail and Org Mode
-- A way to manage important email threads in Org
-- A GTD/P.A.R.A. power tool
-- ~800 lines of Python + ~600 lines of Elisp
-- Usable in 10 minutes, powerful for years
-
-* FAQ
-
-/Questions from the [[https://emacsconf.org/2025/talks/gmail/][EmacsConf 2025]] community. See the [[https://pad.emacsconf.org/2025-gmail][discussion pad]] for more./
-
-** How does it handle attachments?
-
-Currently, attachments are not downloaded. The email body (text/HTML converted to Org) is fetched, but attachments remain in Gmail. You can click the Gmail link in the entry to access them.
-
-*Future plans:* Attachment support is on the roadmap—likely downloading to a configurable directory with Org links to the files.
-
-** Do I need to know all my contacts' email addresses?
-
-For replies, the =FROM=, =TO=, and =CC= fields are pre-filled from the original email's properties. You can edit them interactively before sending. There's no built-in contact list, but completion could integrate with =BBDB= or similar in the future.
-
-** Can I use this with non-Gmail providers (FastMail, etc.)?
-
-Not directly. =org-gmail= is built specifically on the Gmail API for its native label and threading support.
-
-However, the *Org Mode integration patterns* could be adapted. For non-Gmail setups, consider:
-- [[https://github.com/gauteh/lieer][lieer]] — Gmail to Maildir sync (works with notmuch)
-- [[https://github.com/elizagamedev/mujmap][mujmap]] — JMAP to Maildir (works with FastMail)
-- [[https://github.com/JasonSKK/notmuch-lieer-sync][notmuch-lieer-sync]] — notmuch + lieer integration
-
-The Python backend could potentially be adapted for other APIs (Outlook Graph API, JMAP) in the future.
-
-** Do I risk sending emails to the wrong person?
-
-=org-gmail= is designed for *pulling email into Org* for task management, not as a primary email client. For critical communications:
-- Reply recipients are shown and editable before sending
-- Use Gmail's web UI for high-stakes messages
-- The tool is best for managing project context, not mission-critical sending
-
-** What's the main goal of org-gmail?
-
-The core goal is *an easier way to add emails into Org Mode and Org Agenda workflows*. It's not trying to replace your email client—it's trying to make email part of your knowledge management system.
-
-Think of it as: triage in Gmail, process in Org, stay in sync.
-
-** Will there be headers visible when composing replies?
-
-Good feedback! Currently the reply buffer is minimal. Adding visible headers (like =message-mode=) is a reasonable enhancement for a future version.
-
-* Related Projects
-
-For users who want different approaches to email in Emacs:
-
-- [[https://github.com/gauteh/lieer][lieer]] — Fast Gmail to Maildir sync using labels
-- [[https://github.com/elizagamedev/mujmap][mujmap]] — JMAP to Maildir (FastMail, etc.)
-- [[https://github.com/JasonSKK/notmuch-lieer-sync][notmuch-lieer-sync]] — notmuch integration with lieer
-- [[https://www.djcbsoftware.nl/code/mu/mu4e.html][mu4e]] — Full-featured Emacs email client
-- [[https://notmuchmail.org/][notmuch]] — Fast email indexing and search
+=org-gmail= is not a replacement for a full mail client. It is a triage tool: flag in Emacs, sync with Gmail, stay in Org.
 
 * Known Issues
 
-- *Snooze/Defer:* The Gmail API does not officially expose snooze functionality. The =org-gmail-defer-at-point= command may fail with an =AttributeError=. This is a [[https://issuetracker.google.com/issues/109952618][known limitation]] of the Gmail API.
+- *Snooze/Defer Gmail-side:* The Gmail API has no official snooze endpoint. The =defer= command captures the email with a =SCHEDULED= timestamp in Org but does not set a Gmail reminder.
 - *Rate Limits:* Downloading very large labels (10k+ emails) may hit Gmail API rate limits.
-- *OAuth Token Expiry:* In "test mode", tokens expire after 7 days. Publish your app for longer-lived tokens.
-- *Attachments:* Not currently downloaded (see FAQ).
+- *OAuth Token Expiry:* Tokens expire after 7 days in "test" app mode. Publish your Google Cloud app for longer-lived tokens.
+
+* FAQ
+
+** Can I use this with non-Gmail providers?
+
+Not directly — =org-gmail= uses the Gmail API for native label/threading support. For non-Gmail, consider [[https://github.com/gauteh/lieer][lieer]] + notmuch.
+
+** How does multi-account work under the hood?
+
+Each account uses the same OAuth client (=credentials.json=) but a separate token file (=accountname-credentials-token.json=). The browser is only needed once per account for the initial authorization flow.
+
+** Do I risk sending to the wrong person?
+
+Reply recipients are shown and editable before sending. For high-stakes messages, use Gmail's web UI. =org-gmail= is optimized for triage and task capture, not for being a primary send client.
+
+** What happened to v1.x commands?
+
+All v1.x commands still work. =org-gmail-download-by-label=, =org-gmail-sync-labels=, =org-gmail-bulk-move-labels= etc. are unchanged. v2.0 adds the feed-based triage workflow on top.
+
+* Related Projects
+
+- [[https://github.com/gauteh/lieer][lieer]] — Fast Gmail to Maildir sync
+- [[https://www.djcbsoftware.nl/code/mu/mu4e.html][mu4e]] — Full-featured Emacs email client
+- [[https://notmuchmail.org/][notmuch]] — Fast email indexing and search
+- [[https://github.com/elizagamedev/mujmap][mujmap]] — JMAP to Maildir (FastMail, etc.)
 
 * Acknowledgments
 
-Thanks to the [[https://emacsconf.org/2025/][EmacsConf 2025]] community for feedback and questions that improved this documentation.
+Thanks to the [[https://emacsconf.org/2025/][EmacsConf 2025]] community for feedback and questions that shaped this project.
+
+v2.0 developed with assistance from Claude (Anthropic).

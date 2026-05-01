@@ -66,7 +66,8 @@ def get_gmail_service(credentials_path: str = 'credentials.json') -> Any:
         Gmail API service object.
     """
     creds = None
-    token_path = os.path.join(os.path.dirname(credentials_path), 'token.json')
+    creds_stem = os.path.splitext(os.path.basename(credentials_path))[0]
+    token_path = os.path.join(os.path.dirname(credentials_path), f'{creds_stem}-token.json')
     if os.path.exists(token_path):
         with open(token_path, 'rb') as token:
             creds = pickle.load(token)
@@ -978,15 +979,26 @@ def handle_modify_thread_labels(service, thread_id, old_label, new_label):
     modify_thread_labels(service, thread_id, old_label, new_label)
 
 def handle_sync_labels(service, agenda_files, org_file, date_drawer, ignore_labels):
-    labels_to_sync = parse_org_for_labels_from_properties(agenda_files)
-    print(f"Found {len(labels_to_sync)} labels to sync from properties: {labels_to_sync}", file=sys.stderr)
-    
+    # Get all user-created labels from Gmail
+    try:
+        results = service.users().labels().list(userId='me').execute()
+        all_labels = results.get('labels', [])
+        # Only get user-created labels
+        labels_to_sync = [label['name'] for label in all_labels if label['type'] == 'user']
+        print(f"Found {len(labels_to_sync)} user labels in Gmail: {labels_to_sync}", file=sys.stderr)
+    except HttpError as error:
+        print(f'An error occurred while fetching labels: {error}', file=sys.stderr)
+        return
+
     if ignore_labels:
         filtered_labels = []
+        ignored_count = 0
         for label in labels_to_sync:
             if not any(re.search(pattern, label) for pattern in ignore_labels):
                 filtered_labels.append(label)
-        print(f"Ignoring {len(labels_to_sync) - len(filtered_labels)} labels. Syncing {len(filtered_labels)} labels.", file=sys.stderr)
+            else:
+                ignored_count += 1
+        print(f"Ignoring {ignored_count} labels matching ignore patterns. Syncing {len(filtered_labels)} labels.", file=sys.stderr)
         labels_to_sync = filtered_labels
 
     for label in labels_to_sync:
@@ -1058,11 +1070,216 @@ def handle_download_thread(service, thread_id, org_file, date_drawer, agenda_fil
             print(new_content.strip())
             print("---ORG_CONTENT_END---")
 
-def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, thread_id=None, 
-          do_sync_email_ids=False, consolidate=False, credentials=None, 
+def _collect_attachments(payload):
+    """Return list of attachment filenames found in message payload parts."""
+    attachments = []
+    def walk(parts):
+        for part in parts:
+            fname = part.get('filename', '')
+            mime  = part.get('mimeType', '')
+            if fname and not mime.startswith('text/'):
+                attachments.append(fname)
+            sub = part.get('parts', [])
+            if sub:
+                walk(sub)
+    walk(payload.get('parts', []))
+    return attachments
+
+
+def handle_fetch_recent(service, days, agenda_files):
+    """Fetch recent inbox threads as JSON for the feed buffer."""
+    query = f'in:inbox newer_than:{days}d'
+    results = []
+    try:
+        response = service.users().threads().list(userId='me', q=query).execute()
+        threads = response.get('threads', [])
+        for thread_stub in threads[:50]:
+            thread_id = thread_stub['id']
+            try:
+                thread = service.users().threads().get(
+                    userId='me', id=thread_id, format='metadata',
+                    metadataHeaders=['Subject', 'From', 'To', 'Date']
+                ).execute()
+                messages = thread.get('messages', [])
+                if not messages:
+                    continue
+                latest = messages[-1]
+                payload = latest.get('payload', {})
+                headers = {h['name'].lower(): h['value']
+                           for h in payload.get('headers', [])}
+                attachments = _collect_attachments(payload)
+                results.append({
+                    'msg_id':      latest['id'],
+                    'thread_id':   thread_id,
+                    'subject':     headers.get('subject', 'No Subject'),
+                    'from':        headers.get('from', 'Unknown'),
+                    'to':          headers.get('to', ''),
+                    'date':        convert_to_org_timestamp(headers.get('date', '')),
+                    'preview':     latest.get('snippet', '')[:200],
+                    'attachments': attachments,
+                })
+            except HttpError as e:
+                logging.warning(f"Failed to fetch thread {thread_id}: {e}")
+    except HttpError as e:
+        print(f"Error fetching recent threads: {e}", file=sys.stderr)
+        sys.exit(1)
+    print("---FEED_JSON_START---")
+    print(json.dumps(results))
+    print("---FEED_JSON_END---")
+
+
+def handle_sync_threads(service, thread_specs, date_drawer):
+    """For each thread spec ('thread_id:known_id1,known_id2'), fetch new messages."""
+    for spec in thread_specs:
+        if ':' in spec:
+            thread_id, known_ids_str = spec.split(':', 1)
+            known_ids = set(filter(None, known_ids_str.split(',')))
+        else:
+            thread_id = spec.strip()
+            known_ids = set()
+        try:
+            messages = list_messages(service, thread_id=thread_id)
+            new_messages = [m for m in messages if m['id'] not in known_ids]
+            print(f"---THREAD_SYNC_START:{thread_id}---")
+            if new_messages:
+                new_messages_sorted = sorted(
+                    new_messages,
+                    key=lambda m: int(m.get('internalDate', '0'))
+                    if m.get('internalDate') else 0
+                )
+                for msg in new_messages_sorted:
+                    details = get_message_details(service, msg['id'])
+                    if details:
+                        content = f"*** Re: {details['subject']}\n"
+                        content += ":PROPERTIES:\n"
+                        content += f":EMAIL_ID:  {details['msg_id']}\n"
+                        content += f":THREAD_ID: {details['thread_id']}\n"
+                        content += f":FROM:      {details['from']}\n"
+                        content += f":TO:        {details['to']}\n"
+                        content += f":SUBJECT:   {details['subject']}\n"
+                        content += ":END:\n"
+                        content += f":{date_drawer}:\n{details['date']}\n:END:\n\n"
+                        content += f"{details['main_content']}\n\n"
+                        if details['quoted_content']:
+                            content += f"**** Quoted Content\n:QUOTED:\n{details['quoted_content']}\n:END:\n\n"
+                        print(content.strip())
+            print(f"---THREAD_SYNC_END---")
+        except Exception as e:
+            logging.error(f"Error syncing thread {thread_id}: {e}")
+            print(f"---THREAD_SYNC_START:{thread_id}---")
+            print(f"---THREAD_SYNC_END---")
+
+
+def handle_apply_label(service, thread_id, label_name):
+    """Apply LABEL_NAME to THREAD_ID, creating the label if it doesn't exist."""
+    try:
+        label_map = get_label_id_map(service)
+        label_id = label_map.get(label_name)
+        if not label_id:
+            create_label(service, label_name)
+            if os.path.exists(CACHE_PATH):
+                os.remove(CACHE_PATH)
+            label_map = get_label_id_map(service)
+            label_id = label_map.get(label_name)
+        if label_id:
+            service.users().threads().modify(
+                userId='me', id=thread_id,
+                body={'addLabelIds': [label_id]}
+            ).execute()
+            print(f"Label '{label_name}' applied to thread {thread_id}", file=sys.stderr)
+        else:
+            print(f"Error: could not find or create label '{label_name}'", file=sys.stderr)
+            sys.exit(1)
+    except HttpError as e:
+        print(f"Error applying label: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def handle_archive_thread(service, thread_id):
+    """Archive THREAD_ID by removing the INBOX label."""
+    try:
+        service.users().threads().modify(
+            userId='me', id=thread_id,
+            body={'removeLabelIds': ['INBOX']}
+        ).execute()
+        print(f"Thread {thread_id} archived", file=sys.stderr)
+    except HttpError as e:
+        print(f"Error archiving thread {thread_id}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def handle_fetch_message_body(service, msg_id):
+    """Fetch full body of a single message and print it with delimiters to stdout."""
+    try:
+        details = get_message_details(service, msg_id)
+        if not details:
+            print("---BODY_START---", flush=True)
+            print("[Could not fetch message body]", flush=True)
+            print("---BODY_END---", flush=True)
+            return
+        main_content  = details.get('main_content',  '') or ''
+        quoted_content = details.get('quoted_content', '') or ''
+        print("---BODY_START---", flush=True)
+        print(main_content, flush=True)
+        if quoted_content.strip():
+            print("---QUOTED_START---", flush=True)
+            print(quoted_content, flush=True)
+        print("---BODY_END---", flush=True)
+    except Exception as e:
+        print("---BODY_START---", flush=True)
+        print(f"[Error fetching body: {e}]", flush=True)
+        print("---BODY_END---", flush=True)
+
+
+def handle_triage_thread(service, thread_id, actions):
+    """Apply a combination of triage actions to THREAD_ID in one or two API calls.
+
+    actions is a list of strings from: mark-read, archive, star, delete.
+    delete/trash is exclusive and takes priority over label modifications.
+    """
+    if not thread_id:
+        print("triage-thread: no thread_id provided", file=sys.stderr)
+        sys.exit(1)
+    if 'delete' in actions or 'trash' in actions:
+        try:
+            service.users().threads().trash(userId='me', id=thread_id).execute()
+            print(f"Thread {thread_id} trashed", file=sys.stderr)
+        except HttpError as e:
+            print(f"Error trashing thread {thread_id}: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+    add_labels = []
+    remove_labels = []
+    if 'star' in actions:
+        add_labels.append('STARRED')
+    if 'mark-read' in actions:
+        remove_labels.append('UNREAD')
+    if 'archive' in actions:
+        remove_labels.append('INBOX')
+    if not add_labels and not remove_labels:
+        print(f"triage-thread: no recognised actions in {actions}", file=sys.stderr)
+        return
+    body = {}
+    if add_labels:
+        body['addLabelIds'] = add_labels
+    if remove_labels:
+        body['removeLabelIds'] = remove_labels
+    try:
+        service.users().threads().modify(userId='me', id=thread_id, body=body).execute()
+        print(f"Thread {thread_id} triaged: add={add_labels} remove={remove_labels}", file=sys.stderr)
+    except HttpError as e:
+        print(f"Error triaging thread {thread_id}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, thread_id=None,
+          do_sync_email_ids=False, consolidate=False, credentials=None,
           delete_message_id=None, delete_thread_id=None, sync_labels=False,
           modify_thread_labels_args=None, bulk_move_labels_args=None,
-          ignore_labels=None, defer_args=None, reply_args=None, delegate_args=None):
+          ignore_labels=None, defer_args=None, reply_args=None, delegate_args=None,
+          fetch_recent_days=None, sync_threads_specs=None,
+          apply_label_args=None, archive_thread_id=None,
+          triage_thread_args=None):
     """Main function to drive the script's logic."""
     print(f"Starting main with: label='{label_name}', thread_id='{thread_id}', sync={do_sync_email_ids}", file=sys.stderr)
     
@@ -1098,6 +1315,26 @@ def main(label_name=None, org_file=None, date_drawer=None, agenda_files=None, th
             handle_sync_email_ids(agenda_files, consolidate, org_file)
             return
         
+        if fetch_recent_days is not None:
+            handle_fetch_recent(service, fetch_recent_days, agenda_files)
+            return
+
+        if sync_threads_specs is not None:
+            handle_sync_threads(service, sync_threads_specs, date_drawer or 'org-gmail')
+            return
+
+        if apply_label_args:
+            handle_apply_label(service, *apply_label_args)
+            return
+
+        if archive_thread_id:
+            handle_archive_thread(service, archive_thread_id)
+            return
+
+        if triage_thread_args:
+            handle_triage_thread(service, triage_thread_args[0], triage_thread_args[1:])
+            return
+
         if delete_message_id:
             handle_delete_message(service, delete_message_id)
             return
@@ -1141,7 +1378,22 @@ if __name__ == '__main__':
     parser.add_argument('--defer', nargs=2, metavar=('MSG_ID', 'TIME'), help="Snooze a message.")
     parser.add_argument('--reply', nargs=4, metavar=('MSG_ID', 'BODY', 'TO', 'CC'), help="Reply to a message.")
     parser.add_argument('--delegate', nargs=3, metavar=('MSG_ID', 'RECIPIENT', 'NOTE'), help="Forward a message.")
-    
+    parser.add_argument('--fetch-recent', type=int, metavar='DAYS',
+                        help="Fetch recent inbox threads as JSON feed. Use with --agenda-files.")
+    parser.add_argument('--sync-threads', nargs='+', metavar='THREAD_SPEC',
+                        help="Sync threads by ID. Format: thread_id:known_id1,known_id2. Requires --date-drawer.")
+    parser.add_argument('--apply-label', nargs=2, metavar=('THREAD_ID', 'LABEL_NAME'),
+                        help="Apply a Gmail label to a thread (creates it if needed).")
+    parser.add_argument('--archive-thread', metavar='THREAD_ID',
+                        help="Archive a thread by removing the INBOX label.")
+    parser.add_argument('--triage-thread', metavar='THREAD_ID',
+                        help="Apply triage actions to a thread.")
+    parser.add_argument('--triage-actions', nargs='+',
+                        choices=['mark-read', 'archive', 'star', 'delete', 'trash'],
+                        help="Actions for --triage-thread: mark-read, archive, star, delete.")
+    parser.add_argument('--fetch-message-body', metavar='MSG_ID',
+                        help="Fetch and print the full body of MSG_ID (stdout, with delimiters).")
+
     args = parser.parse_args()
 
     # Determine which action to take
@@ -1183,5 +1435,23 @@ if __name__ == '__main__':
         main(reply_args=args.reply, credentials=args.credentials)
     elif args.delegate:
         main(delegate_args=args.delegate, credentials=args.credentials)
+    elif args.fetch_recent is not None:
+        main(fetch_recent_days=args.fetch_recent,
+             agenda_files=args.agenda_files, credentials=args.credentials)
+    elif args.sync_threads:
+        if not args.date_drawer:
+            parser.error("--sync-threads requires --date-drawer")
+        main(sync_threads_specs=args.sync_threads,
+             date_drawer=args.date_drawer, credentials=args.credentials)
+    elif args.apply_label:
+        main(apply_label_args=args.apply_label, credentials=args.credentials)
+    elif args.archive_thread:
+        main(archive_thread_id=args.archive_thread, credentials=args.credentials)
+    elif args.triage_thread:
+        actions = args.triage_actions or []
+        main(triage_thread_args=[args.triage_thread] + actions, credentials=args.credentials)
+    elif args.fetch_message_body:
+        service = get_gmail_service(args.credentials)
+        handle_fetch_message_body(service, args.fetch_message_body)
     else:
         parser.error("You must provide a command.")
