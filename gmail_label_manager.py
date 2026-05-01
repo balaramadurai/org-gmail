@@ -161,7 +161,7 @@ def bulk_move_labels(service, old_label_name, new_label_name):
             print(f"Error: Failed to create or find new label '{new_label_name}' after creation attempt.", file=sys.stderr)
             sys.exit(1)
 
-    query = f'label:"{normalize_label(old_label_name)}"'
+    query = f'label:"{old_label_name}"'
     threads_to_move_stubs = list_messages(service, query=query)
     
     if not threads_to_move_stubs:
@@ -655,12 +655,12 @@ def get_message_details(service, msg_id, label_name=None):
                 raise
     return None
 
-def get_message_details_batch(service: Any, msg_ids: List[str], label_name: Optional[str] = None) -> List[Dict[str, str]]:
-    """Fetches and parses details for multiple messages using batch requests.
+def _get_message_details_batch_chunk(service: Any, msg_ids: List[str], label_name: Optional[str] = None) -> List[Dict[str, str]]:
+    """Fetches and parses details for a chunk of messages using a single batch request.
 
     Args:
         service: Gmail API service object.
-        msg_ids: List of message IDs to fetch.
+        msg_ids: List of message IDs to fetch (caller must ensure len <= 45).
         label_name: Label name for attachment dir.
 
     Returns:
@@ -769,6 +769,29 @@ def get_message_details_batch(service: Any, msg_ids: List[str], label_name: Opti
 
     return details
 
+def get_message_details_batch(service: Any, msg_ids: List[str], label_name: Optional[str] = None) -> List[Dict[str, str]]:
+    """Fetches and parses details for multiple messages using batch requests.
+    Processes in chunks of 45 to stay under the 100-inner-request batch limit
+    (each message requires 2 requests: format='full' and format='raw').
+
+    Args:
+        service: Gmail API service object.
+        msg_ids: List of message IDs to fetch.
+        label_name: Label name for attachment dir.
+
+    Returns:
+        List of dicts with message details.
+    """
+    if not msg_ids:
+        return []
+
+    CHUNK_SIZE = 45  # 45 msgs × 2 requests = 90, safely under limit of 100
+    all_details = []
+    for chunk_start in range(0, len(msg_ids), CHUNK_SIZE):
+        chunk = msg_ids[chunk_start:chunk_start + CHUNK_SIZE]
+        all_details.extend(_get_message_details_batch_chunk(service, chunk, label_name))
+    return all_details
+
 def sync_email_ids(agenda_files, consolidate=False, org_file=None):
     """Finds and optionally consolidates duplicate EMAIL_IDs."""
     email_ids = parse_org_for_email_ids(agenda_files)
@@ -809,8 +832,7 @@ def download_and_append_label(service, label_name, org_file, date_drawer, agenda
     start_time = time.time()
     print(f"\n--- Syncing Label: {label_name} ---", file=sys.stderr)
     
-    normalized_label = normalize_label(label_name)
-    query = f'label:"{normalized_label}"'
+    query = f'label:"{label_name}"'
     messages_with_label = list_messages(service, query=query)
 
     if not messages_with_label:
