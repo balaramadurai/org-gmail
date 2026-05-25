@@ -138,6 +138,17 @@ Symbols: mark-read, archive, star, delete."
                          (const :tag "Delete / Trash" delete)))
   :group 'org-gmail)
 
+(defcustom org-gmail-feed-default-sort-key 'date-desc
+  "Default sort order for Gmail feed buffers.
+One of: date-desc (newest first), date-asc (oldest first), sender, subject, account.
+This is updated automatically when you choose a sort via S in the feed buffer."
+  :type '(choice (const :tag "Newest first (date ↓)" date-desc)
+                 (const :tag "Oldest first (date ↑)" date-asc)
+                 (const :tag "Sender A→Z"             sender)
+                 (const :tag "Subject A→Z"            subject)
+                 (const :tag "Account A→Z"            account))
+  :group 'org-gmail)
+
 ;; Keep old name as alias so existing configs don't break
 (defvaralias 'org-gmail-capture-actions 'org-gmail-do-actions)
 
@@ -622,6 +633,59 @@ ON-SUCCESS is a function to call on successful completion."
         (when buffer-modified
           (save-buffer)
           (message "Updated LABEL in %s" file))))))
+
+(defun org-gmail-add-label-at-point ()
+  "Add a Gmail label to the unlabelled email thread at point."
+  (interactive)
+  (let* ((thread-id (save-excursion (org-back-to-heading t) (org-entry-get (point) "THREAD_ID")))
+         (existing-label (save-excursion (org-back-to-heading t) (org-entry-get (point) "LABEL"))))
+    (cond
+     ((not thread-id)
+      (message "No THREAD_ID property found at point."))
+     (existing-label
+      (message "Thread already has label '%s'. Use org-gmail-edit-label-at-point to change it." existing-label))
+     (t
+      (message "⠙ Fetching labels...")
+      (let* ((buf (get-buffer-create "*Gmail Label Fetch for Add*"))
+             (script-path (expand-file-name org-gmail-python-script))
+             (command (list "python3" script-path "--list-labels"
+                            "--credentials" (expand-file-name org-gmail-credentials-file))))
+        (with-current-buffer buf (erase-buffer))
+        (let ((proc (apply #'start-process "gmail-labels-add" buf command)))
+          (set-process-sentinel
+           proc
+           (lambda (p _e)
+             (when (eq (process-status p) 'exit)
+               (let* ((output (with-current-buffer (process-buffer p) (buffer-string)))
+                      (labels (org-gmail--extract-labels-from-output output)))
+                 (kill-buffer (process-buffer p))
+                 (run-with-timer
+                  0 nil
+                  (lambda ()
+                    (let ((label (completing-read "Add label: " labels nil nil)))
+                      (if (string-empty-p label)
+                          (message "Add label cancelled.")
+                        (org-gmail--apply-label-and-set-property thread-id label)))))))))))))))
+
+(defun org-gmail--apply-label-and-set-property (thread-id label-name)
+  "Apply LABEL-NAME to THREAD-ID in Gmail and set LABEL property in Org heading."
+  (message "⠙ Applying label '%s'..." label-name)
+  (let* ((buf (get-buffer-create "*Gmail Apply Label*"))
+         (script-path (expand-file-name org-gmail-python-script))
+         (command (list "python3" script-path "--apply-label" thread-id label-name
+                        "--credentials" (expand-file-name org-gmail-credentials-file))))
+    (with-current-buffer buf (erase-buffer))
+    (let ((proc (apply #'start-process "gmail-apply-label-interactive" buf command)))
+      (set-process-sentinel
+       proc
+       (lambda (p _e)
+         (when (eq (process-status p) 'exit)
+           (if (zerop (process-exit-status p))
+               (progn
+                 (kill-buffer (process-buffer p))
+                 (org-gmail--update-label-property-in-org-files thread-id label-name)
+                 (message "✅ Label '%s' applied." label-name))
+             (message "❌ Failed to apply label '%s'." label-name))))))))
 
 (defun org-gmail-edit-label-at-point ()
   "Edit the label for the email thread at point in Gmail and Org files."
@@ -1213,6 +1277,10 @@ Keys: Do(c→C), dEfer(e→E), Delete(d→D), archive(a→a), Delegate(A→A), r
 (defvar-local org-gmail-feed--is-integrated nil
   "Non-nil when this feed buffer shows emails from multiple accounts.")
 
+(defvar-local org-gmail-feed--sort-key 'date-desc
+  "Current sort order for the feed buffer.
+One of: date-desc, date-asc, sender, subject, account.")
+
 (defconst org-gmail-feed--badge-colors
   ["dodger blue" "orchid" "orange" "spring green" "goldenrod" "tomato"]
   "Colors cycled for account name badges in the integrated feed.")
@@ -1241,6 +1309,7 @@ Keys: Do(c→C), dEfer(e→E), Delete(d→D), archive(a→a), Delegate(A→A), r
     (define-key map (kbd "u")   #'org-gmail-feed-unflag)
     (define-key map (kbd "x")   #'org-gmail-feed-execute)
     (define-key map (kbd "l")   #'org-gmail-feed-filter)
+    (define-key map (kbd "S")   #'org-gmail-feed-sort)
     (define-key map (kbd "n")   #'org-gmail-feed-next)
     (define-key map (kbd "p")   #'org-gmail-feed-prev)
     (define-key map (kbd "o")   #'org-gmail-feed-open-in-browser)
@@ -1399,8 +1468,12 @@ With a single account or called non-interactively, uses the default account."
                                                           :array-type  'list)))
                        (with-current-buffer (get-buffer-create buf-name)
                          (org-gmail-feed-mode)
-                         (setq org-gmail-feed--account-name acc-name)
-                         (org-gmail--render-feed-buffer emails acc-name))
+                         (setq org-gmail-feed--account-name  acc-name
+                               org-gmail-feed--is-integrated nil
+                               org-gmail-feed--sort-key      org-gmail-feed-default-sort-key
+                               org-gmail-feed--all-emails    emails)
+                         (org-gmail--render-feed-buffer
+                          (org-gmail-feed--sort-emails emails org-gmail-feed-default-sort-key) acc-name))
                        (switch-to-buffer buf-name)
                        (message ""))
                    (message "❌ Could not parse feed JSON")))
@@ -1458,6 +1531,49 @@ FILTER-ACCOUNTS is the active filter (list of names or nil for all)."
     (when (re-search-forward "^  Subject:" nil t)
       (beginning-of-line))))
 
+(defun org-gmail-feed--sort-emails (emails sort-key)
+  "Return EMAILS sorted by SORT-KEY (does not modify the original list).
+SORT-KEY: date-desc newest-first, date-asc oldest-first, sender, subject, account."
+  (cl-sort (copy-sequence emails)
+           (pcase sort-key
+             ('date-desc (lambda (a b) (string> (or (plist-get a :date) "")
+                                                (or (plist-get b :date) ""))))
+             ('date-asc  (lambda (a b) (string< (or (plist-get a :date) "")
+                                                (or (plist-get b :date) ""))))
+             ('sender    (lambda (a b) (string< (downcase (or (plist-get a :from) ""))
+                                                (downcase (or (plist-get b :from) "")))))
+             ('subject   (lambda (a b) (string< (downcase (or (plist-get a :subject) ""))
+                                                (downcase (or (plist-get b :subject) "")))))
+             ('account   (lambda (a b) (string< (or (plist-get a :feed_account) "")
+                                                (or (plist-get b :feed_account) ""))))
+             (_ (lambda (_a _b) nil)))))
+
+(defun org-gmail-feed--apply-sort-and-render ()
+  "Sort `org-gmail-feed--all-emails' by `org-gmail-feed--sort-key' and re-render."
+  (let ((sorted (org-gmail-feed--sort-emails org-gmail-feed--all-emails
+                                              org-gmail-feed--sort-key)))
+    (if org-gmail-feed--is-integrated
+        (org-gmail--render-integrated-buffer sorted org-gmail-feed--filter-accounts)
+      (org-gmail--render-feed-buffer sorted org-gmail-feed--account-name))))
+
+(defun org-gmail-feed-sort ()
+  "Choose a sort order for the email feed and re-render."
+  (interactive)
+  (let* ((choices `(("Newest first (date ↓)" . date-desc)
+                    ("Oldest first (date ↑)" . date-asc)
+                    ("Sender A→Z"            . sender)
+                    ("Subject A→Z"           . subject)
+                    ,@(when org-gmail-feed--is-integrated
+                        '(("Account A→Z" . account)))))
+         (label (completing-read
+                 (format "Sort by [current: %s]: " org-gmail-feed--sort-key)
+                 (mapcar #'car choices) nil t))
+         (key (cdr (assoc label choices))))
+    (when key
+      (setq org-gmail-feed--sort-key key)
+      (customize-save-variable 'org-gmail-feed-default-sort-key key)
+      (org-gmail-feed--apply-sort-and-render))))
+
 (defun org-gmail-feed-filter ()
   "Filter the integrated feed to selected accounts; RET with empty input shows all."
   (interactive)
@@ -1471,77 +1587,81 @@ FILTER-ACCOUNTS is the active filter (list of names or nil for all)."
      org-gmail-feed--filter-accounts)))
 
 (defun org-gmail-feed-all ()
-  "Open an integrated inbox showing emails from all configured accounts in parallel."
+  "Open the integrated inbox, reusing cached emails if available.
+Press g inside the feed to discard the cache and re-fetch."
   (interactive)
   (require 'json)
   (require 'seq)
   (unless org-gmail-accounts
     (user-error "No accounts configured in `org-gmail-accounts'"))
-  (let* ((buf      (get-buffer-create "*Gmail Feed [integrated]*"))
-         (accounts org-gmail-accounts)
-         (n        (length accounts))
-         (pending  n))
-    (with-current-buffer buf
-      (org-gmail-feed-mode)
-      (setq org-gmail-feed--account-name    "integrated"
-            org-gmail-feed--is-integrated   t
-            org-gmail-feed--all-emails      nil
-            org-gmail-feed--filter-accounts nil)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "⏳ Fetching from %d account%s…\n" n (if (= n 1) "" "s")))))
-    (switch-to-buffer buf)
-    (org-gmail-feed--spinner-start "all accounts")
-    (dolist (account accounts)
-      (let* ((acc-name   (plist-get account :name))
-             (creds      (expand-file-name (plist-get account :credentials)))
-             (script     (expand-file-name org-gmail-python-script))
-             (command    (list "python3" script
-                               "--fetch-recent" (number-to-string org-gmail-feed-days)
-                               "--agenda-files" (mapconcat #'identity org-agenda-files ",")
-                               "--credentials"  creds))
-             (output-acc "")
-             (proc       (apply #'start-process
-                                (format "gmail-feed-%s" acc-name) nil command)))
-        (when proc
-          (set-process-filter
-           proc
-           (lambda (_p out) (setq output-acc (concat output-acc out))))
-          (set-process-sentinel
-           proc
-           (lambda (_p event)
-             (when (string-match-p "finished" event)
-               (let* ((js      (string-match "---FEED_JSON_START---" output-acc))
-                      (je      (string-match "---FEED_JSON_END---"   output-acc))
-                      (emails  (when (and js je)
-                                 (condition-case nil
-                                     (json-parse-string
-                                      (string-trim
-                                       (substring output-acc
-                                                  (+ js (length "---FEED_JSON_START---"))
-                                                  je))
-                                      :object-type 'plist
-                                      :array-type  'list)
-                                   (error nil))))
-                      (tagged  (mapcar (lambda (e)
-                                         (plist-put (copy-sequence e) :feed_account acc-name))
-                                       (or emails '()))))
-                 (when (buffer-live-p buf)
-                   (with-current-buffer buf
-                     (setq org-gmail-feed--all-emails
-                           (append org-gmail-feed--all-emails tagged))
-                     (setq pending (1- pending))
-                     (when (zerop pending)
-                       (org-gmail-feed--spinner-stop)
-                       (setq org-gmail-feed--all-emails
-                             (sort org-gmail-feed--all-emails
-                                   (lambda (a b)
-                                     (string> (or (plist-get a :date) "")
-                                              (or (plist-get b :date) "")))))
-                       (org-gmail--render-integrated-buffer
-                        org-gmail-feed--all-emails nil)
-                       (message "")))))))))))))
-
+  (let* ((buf (get-buffer-create "*Gmail Feed [integrated]*")))
+    (if (and (buffer-live-p buf)
+             (buffer-local-value 'org-gmail-feed--all-emails buf))
+        ;; Cache hit: just show the existing buffer.
+        (progn
+          (switch-to-buffer buf)
+          (message "Cached feed (g to refresh)"))
+      ;; Cache miss: fetch from all accounts.
+      (let* ((accounts org-gmail-accounts)
+             (n        (length accounts))
+             (pending  n))
+        (with-current-buffer buf
+          (org-gmail-feed-mode)
+          (setq org-gmail-feed--account-name    "integrated"
+                org-gmail-feed--is-integrated   t
+                org-gmail-feed--all-emails      nil
+                org-gmail-feed--filter-accounts nil
+                org-gmail-feed--sort-key        org-gmail-feed-default-sort-key)
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (format "⏳ Fetching from %d account%s…\n" n (if (= n 1) "" "s")))))
+        (switch-to-buffer buf)
+        (org-gmail-feed--spinner-start "all accounts")
+        (dolist (account accounts)
+          (let* ((acc-name   (plist-get account :name))
+                 (creds      (expand-file-name (plist-get account :credentials)))
+                 (script     (expand-file-name org-gmail-python-script))
+                 (command    (list "python3" script
+                                   "--fetch-recent" (number-to-string org-gmail-feed-days)
+                                   "--agenda-files" (mapconcat #'identity org-agenda-files ",")
+                                   "--credentials"  creds))
+                 (output-acc "")
+                 (proc       (apply #'start-process
+                                    (format "gmail-feed-%s" acc-name) nil command)))
+            (when proc
+              (set-process-filter
+               proc
+               (lambda (_p out) (setq output-acc (concat output-acc out))))
+              (set-process-sentinel
+               proc
+               (lambda (_p event)
+                 (when (string-match-p "finished" event)
+                   (let* ((js      (string-match "---FEED_JSON_START---" output-acc))
+                          (je      (string-match "---FEED_JSON_END---"   output-acc))
+                          (emails  (when (and js je)
+                                     (condition-case nil
+                                         (json-parse-string
+                                          (string-trim
+                                           (substring output-acc
+                                                      (+ js (length "---FEED_JSON_START---"))
+                                                      je))
+                                          :object-type 'plist
+                                          :array-type  'list)
+                                       (error nil))))
+                          (tagged  (mapcar (lambda (e)
+                                             (plist-put (copy-sequence e) :feed_account acc-name))
+                                           (or emails '()))))
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (setq org-gmail-feed--all-emails
+                               (append org-gmail-feed--all-emails tagged))
+                         (setq pending (1- pending))
+                         (when (zerop pending)
+                           (org-gmail-feed--spinner-stop)
+                           (org-gmail--render-integrated-buffer
+                            (org-gmail-feed--sort-emails org-gmail-feed--all-emails org-gmail-feed--sort-key)
+                            nil)
+                           (message "")))))))))))))))
 (defun org-gmail-feed--entry-at-point ()
   "Return the email plist at or nearest to point in the feed buffer."
   (or (get-text-property (point) 'org-gmail-entry)
@@ -2041,10 +2161,12 @@ Reads the :GMAIL_URL: property; falls back to constructing from :THREAD_ID:."
       (message "No GMAIL_URL or THREAD_ID property found on this heading"))))
 
 (defun org-gmail-feed-refresh ()
-  "Refresh the feed buffer with a new fetch."
+  "Clear the cached feed and re-fetch from Gmail."
   (interactive)
   (if org-gmail-feed--is-integrated
-      (org-gmail-feed-all)
+      (progn
+        (setq org-gmail-feed--all-emails nil)
+        (org-gmail-feed-all))
     (org-gmail-feed org-gmail-feed--account-name)))
 
 (defun org-gmail-feed-help ()

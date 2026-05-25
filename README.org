@@ -89,7 +89,27 @@ Leave the note blank to use the email subject as the heading (v1.x behavior).
 
 =org-gmail-feed-all= fetches all configured accounts in parallel and shows them in one buffer. Each email is labeled with a colored account badge (=‹bala›=, =‹niki›=, =‹spirelia›=). Press =l= to filter to one or more accounts without re-fetching.
 
+The feed is cached: invoking =org-gmail-feed-all= a second time shows the cached results instantly. Press =g= inside the feed to discard the cache and re-fetch.
+
 All triage actions (=c=, =e=, =d=, =a=, =A=, =f=, =x=, =o=, =RET=, =TAB=) use the per-email account automatically.
+
+** Sort and Filter
+
+Press =S= in any feed buffer to re-sort without re-fetching:
+
+| Sort key    | Order                          |
+|-------------+--------------------------------|
+| Newest first | Date descending (default)     |
+| Oldest first | Date ascending                |
+| Sender A→Z  | Alphabetical by sender name    |
+| Subject A→Z | Alphabetical by subject line   |
+| Account A→Z | Account name (integrated only) |
+
+The chosen sort is saved to =org-gmail-feed-default-sort-key= and persists across Emacs restarts. You can also set a permanent default in your config:
+
+#+BEGIN_SRC emacs-lisp
+(org-gmail-feed-default-sort-key 'date-asc)  ; oldest first
+#+END_SRC
 
 ** Full Email Body in Detail View
 
@@ -116,6 +136,8 @@ All triage actions (=c=, =e=, =d=, =a=, =A=, =f=, =x=, =o=, =RET=, =TAB=) use th
 - Live triage feed with dired-style 4D flagging
 - Batch execute: all flagged actions processed together with Gmail sync
 - Integrated multi-account inbox with per-email account badges
+- Feed caching: =org-gmail-feed-all= reuses the last fetch; =g= forces a refresh
+- Sort by date, sender, subject, or account (=S=); preference saved across restarts
 - Account filter (=l=) for the integrated view
 - Task note prompt on capture: note = heading, email = sub-heading
 - Async full-body detail view with quoted-text formatting and clickable URLs
@@ -169,6 +191,7 @@ python3 ~/bin/gmail_label_manager.py --fetch-recent 7 \
   (org-gmail-python-script "~/bin/gmail_label_manager.py")
   (org-gmail-date-drawer "org-gmail")
   (org-gmail-feed-days 7)
+  (org-gmail-feed-default-sort-key 'date-asc)   ; optional: oldest-first default
   (org-gmail-sync-ignore-labels '("^4Archives/" "^3Resources/"))
   ;; Multi-account setup
   (org-gmail-accounts
@@ -225,9 +248,10 @@ Flagging:     c             Do    → capture as TODO (prompts for note)
 Execute:      x             confirm then run all flagged actions + sync Gmail
 
 Integrated:   l             filter by account(s) in org-gmail-feed-all
+              S             sort by date / sender / subject / account
 
 Utility:      s             save all Org buffers
-              g             refresh feed
+              g             refresh feed (discards cache and re-fetches)
               ?             show key help
               q             quit
 #+END_SRC
