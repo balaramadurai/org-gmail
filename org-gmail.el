@@ -149,6 +149,29 @@ This is updated automatically when you choose a sort via S in the feed buffer."
                  (const :tag "Account A→Z"            account))
   :group 'org-gmail)
 
+(defcustom org-gmail-capture-heading-level 1
+  "Org heading level for captured emails when no project routing applies.
+When an email matches a project route, the level is derived from the
+'** Emails' sub-heading depth instead.  Set to 2 to restore the old behaviour."
+  :type 'integer
+  :group 'org-gmail)
+
+(defcustom org-gmail-hide-self-sent t
+  "When non-nil, hide emails sent by the user from the feed.
+Addresses are taken from the :address field of each entry in `org-gmail-accounts'.
+A self-sent email whose From matches one of those addresses is filtered out.
+Set to nil to see all emails including ones you sent."
+  :type 'boolean
+  :group 'org-gmail)
+
+(defcustom org-gmail-auto-advance 'next
+  "Direction to advance after acting on an email in the detail view.
+\\='next     — move to the next (older) conversation, like Gmail's default.
+\\='previous — move to the previous (newer) conversation."
+  :type '(choice (const :tag "Next (older)"     next)
+                 (const :tag "Previous (newer)" previous))
+  :group 'org-gmail)
+
 ;; Keep old name as alias so existing configs don't break
 (defvaralias 'org-gmail-capture-actions 'org-gmail-do-actions)
 
@@ -870,6 +893,20 @@ Each entry: (DOMAIN :file FILE :label LABEL :account ACCOUNT :heading HEADING)."
     (when (string-match "@\\(.+\\)$" addr)
       (match-string 1 addr))))
 
+(defun org-gmail--self-sent-p (email)
+  "Return non-nil if EMAIL was sent by one of the user's own accounts.
+Uses the :address fields in `org-gmail-accounts'. Respects `org-gmail-hide-self-sent'."
+  (when (and org-gmail-hide-self-sent org-gmail-accounts)
+    (let* ((from (or (plist-get email :from) ""))
+           (addr (downcase (string-trim
+                            (if (string-match "<\\([^>]+\\)>" from)
+                                (match-string 1 from)
+                              from))))
+           (own  (mapcar (lambda (a)
+                           (downcase (string-trim (or (plist-get a :address) ""))))
+                         org-gmail-accounts)))
+      (member addr own))))
+
 (defun org-gmail--route-email (from-address)
   "Return routing plist for FROM-ADDRESS matched against :EMAIL_DOMAINS: entries.
 Returns plist with :file :label :account :heading, or nil for no match."
@@ -1085,7 +1122,7 @@ NOTE, when non-empty, becomes the task heading; the email is a sub-heading."
                   (save-excursion
                     (goto-char emails-marker)
                     (1+ (org-outline-level))))
-              2))
+              org-gmail-capture-heading-level))
            (entry (org-gmail--format-capture-entry email-plist entry-level label acc
                                                    scheduled-date delegated-to note)))
       (if project-marker
@@ -1421,13 +1458,24 @@ The first character of the entry is the flag slot (space = unflagged)."
     (insert "\n")
     (put-text-property start (point) 'org-gmail-entry email)))
 
+(defun org-gmail--insert-inbox-zero ()
+  "Insert a celebratory inbox-zero message into the current feed buffer."
+  (insert "\n\n")
+  (insert (propertize "          ✨  Inbox Zero!  ✨\n\n"
+                      'face '(:weight bold :height 1.4)))
+  (insert (propertize "     You're all caught up. Nothing left to triage.\n\n"
+                      'face 'shadow))
+  (insert (propertize "          g  refresh  ·  q  quit\n"
+                      'face 'shadow)))
+
 (defun org-gmail--render-feed-buffer (emails account-name)
   "Populate the current feed buffer with EMAILS for ACCOUNT-NAME."
   (org-gmail--build-capture-cache)
   (when org-gmail-feed--flags (clrhash org-gmail-feed--flags))
-  (let ((inhibit-read-only t)
-        (uncaptured nil)
-        (captured   nil))
+  (let* ((emails (seq-remove #'org-gmail--self-sent-p emails))
+         (inhibit-read-only t)
+         (uncaptured nil)
+         (captured   nil))
     (erase-buffer)
     (dolist (email emails)
       (let ((tid (or (plist-get email :thread_id) (plist-get email 'thread_id) "")))
@@ -1454,6 +1502,8 @@ The first character of the entry is the flag slot (space = unflagged)."
                'face 'shadow))
       (dolist (email (reverse captured))
         (org-gmail--insert-feed-entry email t)))
+    (unless (or uncaptured captured)
+      (org-gmail--insert-inbox-zero))
     (goto-char (point-min))
     (re-search-forward "^Subject:" nil t)
     (beginning-of-line)))
@@ -1540,9 +1590,10 @@ FILTER-ACCOUNTS is the active filter (list of names or nil for all)."
   (require 'seq)
   (org-gmail--build-capture-cache)
   (when org-gmail-feed--flags (clrhash org-gmail-feed--flags))
-  (let ((inhibit-read-only t)
-        (uncaptured nil)
-        (captured   nil))
+  (let* ((emails (seq-remove #'org-gmail--self-sent-p emails))
+         (inhibit-read-only t)
+         (uncaptured nil)
+         (captured   nil))
     (erase-buffer)
     (dolist (email emails)
       (let ((tid (or (plist-get email :thread_id) "")))
@@ -1572,6 +1623,8 @@ FILTER-ACCOUNTS is the active filter (list of names or nil for all)."
                'face 'shadow))
       (dolist (email (reverse captured))
         (org-gmail--insert-feed-entry email t)))
+    (unless (or uncaptured captured)
+      (org-gmail--insert-inbox-zero))
     (goto-char (point-min))
     (when (re-search-forward "^  Subject:" nil t)
       (beginning-of-line))))
@@ -1582,7 +1635,8 @@ FILTER-ACCOUNTS is the active account filter (list of names, or nil for all)."
   (require 'seq)
   (org-gmail--build-capture-cache)
   (when org-gmail-feed--flags (clrhash org-gmail-feed--flags))
-  (let ((inhibit-read-only t))
+  (let* ((emails (seq-remove #'org-gmail--self-sent-p emails))
+         (inhibit-read-only t))
     (erase-buffer)
     (let ((filter-str (if filter-accounts
                           (concat "filter: " (string-join filter-accounts ", "))
@@ -1622,6 +1676,8 @@ FILTER-ACCOUNTS is the active account filter (list of names, or nil for all)."
                                  (or (plist-get email :thread_id) ""))))
                 (org-gmail--insert-feed-entry email captured-p)))
             (insert "\n")))))
+    (unless emails
+      (org-gmail--insert-inbox-zero))
     (goto-char (point-min))
     (when (re-search-forward "^  Subject:" nil t)
       (beginning-of-line))))
@@ -1846,14 +1902,31 @@ Press g inside the feed to discard the cache and re-fetch."
                 (point-max))))))
 
 (defun org-gmail-feed--delete-entry ()
-  "Delete the current entry from the feed buffer and advance to next."
+  "Delete the current entry; advance per `org-gmail-auto-advance'."
   (let* ((bounds (org-gmail-feed--entry-bounds))
          (inhibit-read-only t))
     (when bounds
-      (delete-region (car bounds) (cdr bounds))
-      (let ((next (next-single-property-change (point) 'org-gmail-entry nil (point-max))))
-        (when (and next (get-text-property next 'org-gmail-entry))
-          (goto-char next))))))
+      ;; For 'previous, locate the preceding entry's start before deleting.
+      (let ((prev-pos
+             (when (eq org-gmail-auto-advance 'previous)
+               (save-excursion
+                 (goto-char (car bounds))
+                 (let* ((cur-bnd  (previous-single-property-change
+                                   (1+ (point)) 'org-gmail-entry nil (point-min)))
+                        (prev-bnd (when cur-bnd
+                                    (previous-single-property-change
+                                     cur-bnd 'org-gmail-entry nil (point-min))))
+                        (in-prev  (and prev-bnd (> prev-bnd (point-min))
+                                       (get-text-property (1- prev-bnd) 'org-gmail-entry))))
+                   (when in-prev
+                     (previous-single-property-change prev-bnd 'org-gmail-entry
+                                                      nil (point-min))))))))
+        (delete-region (car bounds) (cdr bounds))
+        (if (and prev-pos (get-text-property prev-pos 'org-gmail-entry))
+            (goto-char prev-pos)
+          (let ((next (next-single-property-change (point) 'org-gmail-entry nil (point-max))))
+            (when (and next (get-text-property next 'org-gmail-entry))
+              (goto-char next))))))))
 
 (defun org-gmail-feed--set-flag-char (entry-start flag-sym)
   "Set the flag display character at ENTRY-START for FLAG-SYM (nil = unflag)."
@@ -2275,6 +2348,7 @@ Headers are inserted immediately; body is fetched asynchronously."
   (let* ((subject     (or (plist-get email :subject)   "No Subject"))
          (from        (or (plist-get email :from)       "Unknown"))
          (to          (or (plist-get email :to)         ""))
+         (cc          (or (plist-get email :cc)         ""))
          (date        (or (plist-get email :date)       ""))
          (thread-id   (or (plist-get email :thread_id)  ""))
          (msg-id      (or (plist-get email :msg_id)     ""))
@@ -2287,6 +2361,8 @@ Headers are inserted immediately; body is fetched asynchronously."
         (insert (make-string 70 ?─) "\n")
         (insert (propertize (format "From:    %s\n" from)      'face 'font-lock-keyword-face))
         (insert (propertize (format "To:      %s\n" to)        'face 'shadow))
+        (when (not (string-empty-p cc))
+          (insert (propertize (format "Cc:      %s\n" cc)      'face 'shadow)))
         (insert (propertize (format "Date:    %s\n" date)      'face 'shadow))
         (insert (propertize (format "Thread:  %s\n" thread-id) 'face 'shadow))
         (insert (propertize (format "Msg-ID:  %s\n" msg-id)    'face 'shadow))

@@ -569,6 +569,40 @@ def escape_org_headings(text):
     escaped_lines = [',' + line if line.strip().startswith('*') else line for line in lines]
     return '\n'.join(escaped_lines)
 
+def _html_to_text(html_content):
+    """Convert HTML to plain text, preserving paragraph structure."""
+    h = html2text.HTML2Text()
+    h.body_width = 0          # don't hard-wrap lines
+    h.ignore_images = True
+    h.ignore_emphasis = False
+    h.ignore_links = False
+    h.unicode_snob = True
+    return h.handle(html_content)
+
+def _extract_body_from_email(email_msg):
+    """Extract body text from an email.Message, preferring HTML for structure."""
+    plain_body = ''
+    html_body = ''
+    if email_msg.is_multipart():
+        for part in email_msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get('Content-Disposition', ''))
+            if 'attachment' in content_disposition:
+                continue
+            if content_type == 'text/html' and not html_body:
+                html_body = part.get_payload(decode=True).decode('utf-8', errors='replace')
+            elif content_type == 'text/plain' and not plain_body:
+                plain_body = part.get_payload(decode=True).decode('utf-8', errors='replace')
+    else:
+        if email_msg.get_content_type() == 'text/html':
+            html_body = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
+        elif email_msg.get_content_type() == 'text/plain':
+            plain_body = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
+    # Prefer HTML — it preserves paragraph structure far better than text/plain
+    if html_body:
+        return _html_to_text(html_body)
+    return plain_body
+
 def get_message_details(service, msg_id, label_name=None):
     """Fetches and parses the details of a single email message."""
     for attempt in range(MAX_RETRIES):
@@ -587,32 +621,12 @@ def get_message_details(service, msg_id, label_name=None):
 
             org_timestamp = convert_to_org_timestamp(date)
 
-            body = ''
-            if email_msg.is_multipart():
-                for part in email_msg.walk():
-                    content_type = part.get_content_type()
-                    content_disposition = str(part.get('Content-Disposition'))
-
-                    if content_type == 'text/plain' and 'attachment' not in content_disposition:
-                        body = part.get_payload(decode=True).decode('utf-8', errors='replace')
-                        break
-                    elif content_type == 'text/html' and 'attachment' not in content_disposition:
-                        html_content = part.get_payload(decode=True).decode('utf-8', errors='replace')
-                        body = html2text.html2text(html_content)
-            else:
-                if email_msg.get_content_type() == 'text/plain':
-                    body = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
-                elif email_msg.get_content_type() == 'text/html':
-                    html_content = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
-                    body = html2text.html2text(html_content)
-
+            body = _extract_body_from_email(email_msg)
             body = body.replace('\r\n', '\n').replace('\r', '')
             body = re.sub(r'\n\s*\n+', '\n\n', body.strip())
             body = convert_markdown_to_org_links(body)
 
             main_content, quoted_content = split_quoted_content(body)
-            
-            # Escape potential Org mode headings in the email body
             main_content = escape_org_headings(main_content)
             quoted_content = escape_org_headings(quoted_content)
 
@@ -708,24 +722,7 @@ def _get_message_details_batch_chunk(service: Any, msg_ids: List[str], label_nam
             thread_id = message['threadId']
             org_timestamp = convert_to_org_timestamp(date)
 
-            body = ''
-            if email_msg.is_multipart():
-                for part in email_msg.walk():
-                    content_type = part.get_content_type()
-                    content_disposition = str(part.get('Content-Disposition'))
-                    if content_type == 'text/plain' and 'attachment' not in content_disposition:
-                        body = part.get_payload(decode=True).decode('utf-8', errors='replace')
-                        break
-                    elif content_type == 'text/html' and 'attachment' not in content_disposition:
-                        html_content = part.get_payload(decode=True).decode('utf-8', errors='replace')
-                        body = html2text.html2text(html_content)
-            else:
-                if email_msg.get_content_type() == 'text/plain':
-                    body = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
-                elif email_msg.get_content_type() == 'text/html':
-                    html_content = email_msg.get_payload(decode=True).decode('utf-8', errors='replace')
-                    body = html2text.html2text(html_content)
-
+            body = _extract_body_from_email(email_msg)
             body = body.replace('\r\n', '\n').replace('\r', '')
             body = re.sub(r'\n\s*\n+', '\n\n', body.strip())
             body = convert_markdown_to_org_links(body)
@@ -1136,6 +1133,7 @@ def handle_fetch_recent(service, days, agenda_files):
                     'subject':     headers.get('subject', 'No Subject'),
                     'from':        headers.get('from', 'Unknown'),
                     'to':          headers.get('to', ''),
+                    'cc':          headers.get('cc', ''),
                     'date':        convert_to_org_timestamp(headers.get('date', '')),
                     'preview':     latest.get('snippet', '')[:200],
                     'attachments': attachments,
