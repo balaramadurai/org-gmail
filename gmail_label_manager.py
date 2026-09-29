@@ -609,6 +609,21 @@ def _extract_body_from_email(email_msg):
         return _html_to_text(html_body)
     return plain_body
 
+def _extract_html_from_email(email_msg):
+    """Return the first non-attachment text/html part of EMAIL_MSG, or ''."""
+    for part in (email_msg.walk() if email_msg.is_multipart() else [email_msg]):
+        if 'attachment' in str(part.get('Content-Disposition', '')):
+            continue
+        if part.get_content_type() == 'text/html':
+            payload = part.get_payload(decode=True)
+            if payload:
+                try:
+                    return payload.decode(part.get_content_charset() or 'utf-8',
+                                          errors='replace')
+                except LookupError:  # unknown charset name
+                    return payload.decode('utf-8', errors='replace')
+    return ''
+
 def get_message_details(service, msg_id, label_name=None):
     """Fetches and parses the details of a single email message."""
     for attempt in range(MAX_RETRIES):
@@ -664,6 +679,7 @@ def get_message_details(service, msg_id, label_name=None):
                 'to': to_addr,
                 'date': org_timestamp,
                 'main_content': main_content,
+                'html_body': _extract_html_from_email(email_msg),
                 'quoted_content': quoted_content,
                 'attachments': attachments
             }
@@ -1251,6 +1267,12 @@ def handle_fetch_message_body(service, msg_id):
             print("---QUOTED_START---", flush=True)
             print(quoted_content, flush=True)
         print("---BODY_END---", flush=True)
+        html_body = details.get('html_body', '') or ''
+        if html_body.strip():
+            # base64 so arbitrary HTML cannot collide with the delimiters
+            print("---HTML_START---", flush=True)
+            print(base64.b64encode(html_body.encode('utf-8')).decode('ascii'), flush=True)
+            print("---HTML_END---", flush=True)
     except Exception as e:
         print("---BODY_START---", flush=True)
         print(f"[Error fetching body: {e}]", flush=True)

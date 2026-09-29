@@ -105,3 +105,32 @@ def test_get_gmail_service_reauths_when_refresh_token_revoked(
     mock_flow.from_client_secrets_file.return_value.run_local_server.assert_called_once()
     mock_pickle.dump.assert_called_once_with(fresh, mock_file())
     mock_build.assert_called_once_with('gmail', 'v1', credentials=fresh)
+
+
+def test_extract_html_from_email_prefers_html_part_and_skips_attachments():
+    from email.message import EmailMessage
+    from gmail_label_manager import _extract_html_from_email
+    msg = EmailMessage()
+    msg.set_content("plain body")
+    msg.add_alternative("<p>Hello <b>world</b> — café</p>", subtype='html')
+    msg.add_attachment("<p>not me</p>", subtype='html', filename='a.html')
+    assert _extract_html_from_email(msg) == "<p>Hello <b>world</b> — café</p>\n"
+
+    plain = EmailMessage()
+    plain.set_content("only text")
+    assert _extract_html_from_email(plain) == ''
+
+
+@patch('gmail_label_manager.get_message_details')
+def test_fetch_message_body_emits_base64_html_block(mock_details, capsys=None):
+    import base64, io, contextlib
+    from gmail_label_manager import handle_fetch_message_body
+    html = "<p>---BODY_END--- inside html</p>"
+    mock_details.return_value = {'main_content': 'hi', 'quoted_content': '', 'html_body': html}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        handle_fetch_message_body(Mock(), 'm1')
+    out = buf.getvalue()
+    encoded = out.split("---HTML_START---\n")[1].split("\n---HTML_END---")[0]
+    assert base64.b64decode(encoded).decode('utf-8') == html
+    assert out.index("---BODY_END---") < out.index("---HTML_START---")

@@ -1388,6 +1388,8 @@ One of: date-desc, date-asc, sender, subject, account.")
     (define-key map (kbd "S")   #'org-gmail-feed-sort)
     (define-key map (kbd "n")   #'org-gmail-feed-next)
     (define-key map (kbd "p")   #'org-gmail-feed-prev)
+    (define-key map (kbd "j")   #'org-gmail-feed-next)   ; Gmail-style
+    (define-key map (kbd "k")   #'org-gmail-feed-prev)
     (define-key map (kbd "o")   #'org-gmail-feed-open-in-browser)
     (define-key map (kbd "s")   #'org-gmail-feed-save)
     (define-key map (kbd "C-g") #'org-gmail-feed-cancel-sync)
@@ -1489,7 +1491,7 @@ The first character of the entry is the flag slot (space = unflagged)."
                     account-name org-gmail-feed-days))
     (insert (make-string 60 ?─) "\n")
     (insert "c:Do(TODO)  e:dEfer(sched)  d:Delete  a:archive  A:Delegate(fwd)  f:reFile  r:Reply\n")
-    (insert "u:unflag  x:execute-all  RET:full  TAB:split  o:open  s:save  n/p:next/prev  g:refresh  q:quit\n")
+    (insert "u:unflag  x:execute-all  RET:full  TAB:split  o:open  s:save  n/p j/k:next/prev  g:refresh  q:quit\n")
     (insert (make-string 60 ?─) "\n\n")
     (when uncaptured
       (insert (propertize
@@ -1610,7 +1612,7 @@ FILTER-ACCOUNTS is the active filter (list of names or nil for all)."
                       filter-str org-gmail-feed-days))
       (insert (make-string 60 ?─) "\n")
       (insert "c:Do  e:dEfer  d:Delete  a:archive  A:Delegate  f:reFile  r:Reply\n")
-      (insert "u:unflag  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p  v:agenda  g:refresh  q:quit\n")
+      (insert "u:unflag  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p j/k  v:agenda  g:refresh  q:quit\n")
       (insert (make-string 60 ?─) "\n\n"))
     (when uncaptured
       (insert (propertize
@@ -1648,7 +1650,7 @@ FILTER-ACCOUNTS is the active account filter (list of names, or nil for all)."
                       filter-str org-gmail-feed-days))
       (insert (make-string 60 ?─) "\n")
       (insert "c:Do  e:dEfer  d:Delete  a:archive  A:Delegate  f:reFile  r:Reply\n")
-      (insert "u:unflag  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p  v:triage  g:refresh  q:quit\n")
+      (insert "u:unflag  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p j/k  v:triage  g:refresh  q:quit\n")
       (insert (make-string 60 ?─) "\n\n"))
     (let ((sorted (org-gmail-feed--sort-emails emails 'date-desc))
           (buckets (list (cons 'today     nil)
@@ -1899,7 +1901,7 @@ Press g inside the feed to discard the cache and re-fetch."
   "Return the email plist at or nearest to point in the feed buffer."
   (or (get-text-property (point) 'org-gmail-entry)
       (save-excursion
-        (let ((prev (previous-single-property-change (1+ (point)) 'org-gmail-entry nil (point-min))))
+        (let ((prev (previous-single-property-change (min (1+ (point)) (point-max)) 'org-gmail-entry nil (point-min))))
           (when prev (get-text-property prev 'org-gmail-entry))))
       (save-excursion
         (let ((next (next-single-property-change (point) 'org-gmail-entry nil (point-max))))
@@ -1911,11 +1913,11 @@ Press g inside the feed to discard the cache and re-fetch."
     (cond
      ;; Currently inside an entry — find its start
      ((get-text-property pos 'org-gmail-entry)
-      (or (previous-single-property-change (1+ pos) 'org-gmail-entry nil (point-min))
+      (or (previous-single-property-change (min (1+ pos) (point-max)) 'org-gmail-entry nil (point-min))
           (point-min)))
      ;; In a gap — search backward for the end of the previous entry, then its start
      (t
-      (let ((prev-end (previous-single-property-change (1+ pos) 'org-gmail-entry nil (point-min))))
+      (let ((prev-end (previous-single-property-change (min (1+ pos) (point-max)) 'org-gmail-entry nil (point-min))))
         (when (and prev-end (get-text-property (max (point-min) (1- prev-end)) 'org-gmail-entry))
           (or (previous-single-property-change prev-end 'org-gmail-entry nil (point-min))
               (point-min))))))))
@@ -1924,12 +1926,55 @@ Press g inside the feed to discard the cache and re-fetch."
   "Return (BEG . END) of the current entry's text region using text properties."
   (let ((pos (org-gmail-feed--entry-pos)))
     (when pos
-      (cons (or (previous-single-property-change (1+ pos) 'org-gmail-entry
-                                                 nil (point-min))
+      (cons (or (previous-single-property-change (min (1+ pos) (point-max))
+                                                 'org-gmail-entry nil (point-min))
                 (point-min))
             (or (next-single-property-change pos 'org-gmail-entry
                                              nil (point-max))
                 (point-max))))))
+
+(defconst org-gmail-feed--section-re "^── .+ (\\([0-9]+\\)) ─"
+  "Regexp matching a feed section header; group 1 is the entry count.")
+
+(defun org-gmail-feed--count-entries (beg end)
+  "Return the number of feed entries that start between BEG and END."
+  (let ((pos beg) (n 0) prev)
+    (while (< pos end)
+      (let ((e (get-text-property pos 'org-gmail-entry)))
+        (when (and e (not (eq e prev))) (setq n (1+ n)))
+        (setq prev e
+              pos (next-single-property-change pos 'org-gmail-entry nil end))))
+    n))
+
+(defun org-gmail-feed--update-section-counts ()
+  "Recount entries under each section header; drop headers of empty sections."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward org-gmail-feed--section-re nil t)
+        (let* ((hdr-beg (line-beginning-position))
+               (end (save-excursion
+                      (save-match-data
+                        (if (re-search-forward org-gmail-feed--section-re nil t)
+                            (line-beginning-position)
+                          (point-max)))))
+               (n (org-gmail-feed--count-entries (line-end-position) end)))
+          (if (zerop n)
+              (delete-region hdr-beg (min (point-max) (+ 2 (line-end-position))))
+            (let ((face (get-text-property hdr-beg 'face)))
+              (replace-match (number-to-string n) t t nil 1)
+              (put-text-property hdr-beg (line-end-position) 'face face))))))))
+
+(defun org-gmail-feed--goto-thread (thread-id)
+  "Move point to the feed entry whose thread id is THREAD-ID.
+Return the entry's start position, or nil if it is not in the buffer."
+  (let ((pos (point-min)) found)
+    (while (and (not found) pos (< pos (point-max)))
+      (let ((email (get-text-property pos 'org-gmail-entry)))
+        (if (and email (equal (plist-get email :thread_id) thread-id))
+            (setq found pos)
+          (setq pos (next-single-property-change pos 'org-gmail-entry)))))
+    (when found (goto-char found))))
 
 (defun org-gmail-feed--delete-entry ()
   "Delete the current entry; advance per `org-gmail-auto-advance'."
@@ -1951,7 +1996,9 @@ Press g inside the feed to discard the cache and re-fetch."
                    (when in-prev
                      (previous-single-property-change prev-bnd 'org-gmail-entry
                                                       nil (point-min))))))))
+        (when prev-pos (setq prev-pos (copy-marker prev-pos)))
         (delete-region (car bounds) (cdr bounds))
+        (org-gmail-feed--update-section-counts)
         (if (and prev-pos (get-text-property prev-pos 'org-gmail-entry))
             (goto-char prev-pos)
           (let ((next (next-single-property-change (point) 'org-gmail-entry nil (point-max))))
@@ -2134,6 +2181,9 @@ delegAte (A) = forward+capture.  After x, refile Do/Defer items with C-c C-w."
                  (acc       (or (and org-gmail-feed--is-integrated
                                     (plist-get email :feed_account))
                                org-gmail-feed--account-name)))
+            ;; Unflag before acting, so an error later in the batch cannot
+            ;; make a retry capture/triage this email a second time.
+            (remhash thread-id org-gmail-feed--flags)
             (pcase flag-sym
               ('do
                (let ((note (and (listp extra) (plist-get extra :note))))
@@ -2188,7 +2238,8 @@ delegAte (A) = forward+capture.  After x, refile Do/Defer items with C-c C-w."
         (let ((inhibit-read-only t))
           (dolist (item (sort items (lambda (a b)
                                      (> (car (nth 3 a)) (car (nth 3 b))))))
-            (delete-region (car (nth 3 item)) (cdr (nth 3 item)))))
+            (delete-region (car (nth 3 item)) (cdr (nth 3 item))))
+          (org-gmail-feed--update-section-counts))
         (clrhash org-gmail-feed--flags)
         (message "Processed %d email%s" total (if (= total 1) "" "s"))))))
 
@@ -2218,7 +2269,7 @@ delegAte (A) = forward+capture.  After x, refile Do/Defer items with C-c C-w."
   (interactive)
   (let* ((pos (point))
          ;; Boundary of the property region at or before pos
-         (cur-bnd  (previous-single-property-change (1+ pos) 'org-gmail-entry
+         (cur-bnd  (previous-single-property-change (min (1+ pos) (point-max)) 'org-gmail-entry
                                                     nil (point-min)))
          ;; Boundary before that (end of previous entry or point-min)
          (prev-bnd (when cur-bnd
@@ -2358,7 +2409,10 @@ FLAG-SYM: do, defer, delete, archive, delegate, refile, reply, open-browser."
     (when advance
       (if (and feed-buf (buffer-live-p feed-buf))
           (with-current-buffer feed-buf
-            (org-gmail-feed--delete-entry)
+            ;; Locate the acted-on email by thread id: the feed buffer's own
+            ;; point can lag behind (or sit at point-max) while in detail view.
+            (when (org-gmail-feed--goto-thread thread-id)
+              (org-gmail-feed--delete-entry))
             (let ((next (org-gmail-feed--entry-at-point)))
               (if next
                   (let* ((acc (or (and org-gmail-feed--is-integrated
@@ -2370,6 +2424,146 @@ FLAG-SYM: do, defer, delete, archive, delegate, refile, reply, open-browser."
                   (switch-to-buffer feed-buf)
                   (message "🎉 Inbox zero! No more emails to process.")))))
         (quit-window)))))
+
+;;; HTML rendering in the detail view (xwidget-webkit)
+
+(defcustom org-gmail-detail-render-html t
+  "When non-nil, render HTML emails with xwidget-webkit in the detail view.
+Only takes effect when Emacs has xwidget support and a graphical frame;
+otherwise the plain-text body is shown."
+  :type 'boolean
+  :group 'org-gmail)
+
+(defcustom org-gmail-html-load-remote-images nil
+  "When non-nil, let rendered HTML emails load remote images and styles.
+Remote images are off by default because they act as read receipts
+(tracking pixels).  Press I in the detail view to load them per email.
+Scripts are always blocked."
+  :type 'boolean
+  :group 'org-gmail)
+
+(defvar-local org-gmail-feed--detail-html nil
+  "Raw HTML body of the email shown in this detail buffer, or nil.")
+(defvar-local org-gmail-feed--detail-body-start nil
+  "Marker at the start of the body region in the detail buffer.")
+(defvar-local org-gmail-feed--detail-body-end nil
+  "Marker at the end of the body region in the detail buffer.")
+(defvar-local org-gmail-feed--detail-view nil
+  "How the body is currently shown: `html' or `text'.")
+(defvar-local org-gmail-feed--detail-remote-ok nil
+  "Non-nil when remote images were allowed for this detail buffer.")
+
+(defun org-gmail--webkit-available-p ()
+  "Return non-nil when HTML emails can be rendered with xwidget-webkit."
+  (and org-gmail-detail-render-html
+       (featurep 'xwidget-internal)
+       (display-graphic-p)))
+
+(defun org-gmail-feed--parse-html-output (output)
+  "Return the decoded HTML body from --fetch-message-body OUTPUT, or nil."
+  (let ((hs (string-match "---HTML_START---" output))
+        (he (string-match "---HTML_END---" output)))
+    (when (and hs he (< hs he))
+      (condition-case nil
+          (let ((html (decode-coding-string
+                       (base64-decode-string
+                        (string-trim (substring output (+ hs (length "---HTML_START---")) he)))
+                       'utf-8)))
+            (unless (string-empty-p (string-trim html)) html))
+        (error nil)))))
+
+(defun org-gmail--html-wrap (html allow-remote)
+  "Return HTML with a Content-Security-Policy that blocks scripts.
+Remote images, styles and fonts are blocked unless ALLOW-REMOTE."
+  (let ((csp (if allow-remote
+                 "default-src 'none'; style-src 'unsafe-inline' https: http:; img-src data: cid: https: http:; font-src data: https:"
+               "default-src 'none'; style-src 'unsafe-inline'; img-src data: cid:; font-src data:")))
+    ;; A <meta> before <html> is hoisted into <head> by the HTML parser.
+    (concat "<meta http-equiv=\"Content-Security-Policy\" content=\"" csp "\">\n"
+            "<meta charset=\"utf-8\">\n"
+            html)))
+
+(defun org-gmail-feed--detail-xwidget ()
+  "Return the webkit xwidget in the current detail buffer, or nil."
+  (and (fboundp 'get-buffer-xwidgets)
+       (car (get-buffer-xwidgets (current-buffer)))))
+
+(defun org-gmail-feed--detail-kill-xwidgets ()
+  "Kill any xwidgets in the current buffer (it is about to be redrawn)."
+  (when (fboundp 'get-buffer-xwidgets)
+    (dolist (xw (get-buffer-xwidgets (current-buffer)))
+      (kill-xwidget xw))))
+
+(defun org-gmail-feed--detail-render-body (view)
+  "Draw the stored body in the current detail buffer as VIEW (`html' or `text')."
+  (let ((inhibit-read-only t)
+        (beg org-gmail-feed--detail-body-start)
+        (end org-gmail-feed--detail-body-end))
+    (when (and beg end)
+      (org-gmail-feed--detail-kill-xwidgets)
+      (delete-region beg end)
+      (save-excursion
+        (goto-char beg)
+        (if (and (eq view 'html) org-gmail-feed--detail-html)
+            (let* ((win (get-buffer-window (current-buffer) t))
+                   (lh  (default-line-height))
+                   (w   (if win (- (window-body-width win t) (* 2 (frame-char-width))) 800))
+                   (h   (if win
+                            (max 200 (- (window-body-height win t)
+                                        (* lh (+ 3 (count-lines (point-min) beg)))))
+                          600))
+                   (xw  (make-xwidget 'webkit "org-gmail" w h nil (current-buffer))))
+              (set-xwidget-query-on-exit-flag xw nil)
+              (insert (propertize "*" 'display (list 'xwidget :xwidget xw)) "\n")
+              (xwidget-webkit-load-html
+               xw (org-gmail--html-wrap org-gmail-feed--detail-html
+                                        org-gmail-feed--detail-remote-ok)
+               "about:blank"))
+          (setq view 'text)
+          (let ((parsed org-gmail-feed--detail-body))
+            (if parsed
+                (org-gmail-feed--insert-body (car parsed) (cdr parsed))
+              (insert (propertize "[No body content]\n" 'face 'shadow)))))))
+    (setq org-gmail-feed--detail-view view)))
+
+(defun org-gmail-feed-detail-toggle-html ()
+  "Switch the detail body between rendered HTML and plain text."
+  (interactive)
+  (cond
+   ((not org-gmail-feed--detail-html) (message "This email has no HTML part"))
+   ((not (org-gmail--webkit-available-p))
+    (message "HTML rendering needs Emacs with xwidgets in a graphical frame"))
+   (t (org-gmail-feed--detail-render-body
+       (if (eq org-gmail-feed--detail-view 'html) 'text 'html)))))
+
+(defun org-gmail-feed-detail-load-images ()
+  "Reload the rendered HTML with remote images allowed (this email only)."
+  (interactive)
+  (let ((xw (org-gmail-feed--detail-xwidget)))
+    (if (not (and xw org-gmail-feed--detail-html))
+        (message "No rendered HTML in this view")
+      (setq org-gmail-feed--detail-remote-ok t)
+      (xwidget-webkit-load-html
+       xw (org-gmail--html-wrap org-gmail-feed--detail-html t) "about:blank")
+      (message "Remote images loaded"))))
+
+(defun org-gmail-feed--detail-scroll (direction fallback)
+  "Scroll the rendered HTML by a page in DIRECTION (1 or -1), else call FALLBACK."
+  (let ((xw (org-gmail-feed--detail-xwidget)))
+    (if xw
+        (xwidget-webkit-execute-script
+         xw (format "window.scrollBy(0, %d * window.innerHeight * 0.9)" direction))
+      (call-interactively fallback))))
+
+(defun org-gmail-feed-detail-scroll-up ()
+  "Scroll the email body forward a page."
+  (interactive)
+  (org-gmail-feed--detail-scroll 1 #'scroll-up-command))
+
+(defun org-gmail-feed-detail-scroll-down ()
+  "Scroll the email body back a page."
+  (interactive)
+  (org-gmail-feed--detail-scroll -1 #'scroll-down-command))
 
 (defun org-gmail-feed--build-detail-buffer (email account-name &optional feed-buffer)
   "Build and return a *Gmail Detail* buffer for EMAIL from ACCOUNT-NAME.
@@ -2385,6 +2579,7 @@ Headers are inserted immediately; body is fetched asynchronously."
          (attachments (plist-get email :attachments))
          (buf         (get-buffer-create "*Gmail Detail*")))
     (with-current-buffer buf
+      (org-gmail-feed--detail-kill-xwidgets)
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (propertize (format "%s\n" subject) 'face '(:weight bold :height 1.1)))
@@ -2411,7 +2606,7 @@ Headers are inserted immediately; body is fetched asynchronously."
                  (output-acc "")
                  (creds (org-gmail--credentials account-name)))
             (set-marker-insertion-type footer-marker t)
-            (insert "\n[RET]follow-link  [n/p]next/prev  [o]open-browser  [c]Do  [e]dEfer  [d]Delete  [a]archive  [A]Delegate  [f]reFile  [r]Reply  [q]uit\n")
+            (insert "\n[RET]follow-link  [n/p j/k]next/prev  [o]open-browser  [c]Do  [e]dEfer  [d]Delete  [a]archive  [A]Delegate  [f]reFile  [r]Reply  [SPC/DEL]scroll  [I]images  [T]text/html  [q]uit\n")
             ;; Async body fetch (only when we have a msg-id)
             (when (and msg-id (not (string-empty-p msg-id)))
               (let ((proc (start-process "gmail-body-fetch" nil
@@ -2427,28 +2622,22 @@ Headers are inserted immediately; body is fetched asynchronously."
                    proc
                    (lambda (_p event)
                      (when (string-match-p "finished" event)
-                       (let ((parsed (org-gmail-feed--parse-body-output output-acc)))
+                       (let ((parsed (org-gmail-feed--parse-body-output output-acc))
+                             (html   (org-gmail-feed--parse-html-output output-acc)))
                          (when (buffer-live-p buf)
                            (with-current-buffer buf
-                             (let ((inhibit-read-only t))
-                               ;; Find and delete the placeholder line
-                               (save-excursion
-                                 (goto-char body-marker)
-                                 (let ((ph-end (next-single-property-change
-                                                (point) 'org-gmail-body-placeholder
-                                                nil (point-max))))
-                                   (when ph-end
-                                     (delete-region (point) ph-end))))
-                               ;; Insert formatted body at the marker
-                               (save-excursion
-                                 (goto-char body-marker)
-                                 (if parsed
-                                     (org-gmail-feed--insert-body (car parsed) (cdr parsed))
-                                   (insert (propertize "[No body content]\n" 'face 'shadow)))))
-                             (when parsed
-                               (setq org-gmail-feed--detail-body parsed))
-                             (visual-line-mode 1)
-                             (goto-address-mode 1)))))))))))))
+                             ;; The detail buffer is reused: drop a body that
+                             ;; arrives after the user has moved to another email.
+                             (when (equal (plist-get org-gmail-feed--detail-email :msg_id)
+                                          msg-id)
+                               (setq org-gmail-feed--detail-body       parsed
+                                     org-gmail-feed--detail-html       html
+                                     org-gmail-feed--detail-body-start body-marker
+                                     org-gmail-feed--detail-body-end   footer-marker)
+                               (org-gmail-feed--detail-render-body
+                                (if (and html (org-gmail--webkit-available-p))
+                                    'html
+                                  'text)))))))))))))))
       (special-mode)
       ;; Set after special-mode: (special-mode) calls kill-all-local-variables
       (setq org-gmail-feed--detail-email        email
@@ -2456,6 +2645,16 @@ Headers are inserted immediately; body is fetched asynchronously."
             org-gmail-feed--detail-feed-buffer  feed-buffer)
       (visual-line-mode 1)
       (goto-address-mode 1)
+      ;; Buffer-private keymap: `local-set-key' on bare `special-mode-map'
+      ;; would leak these bindings into every other special-mode buffer.
+      (use-local-map (let ((m (make-sparse-keymap)))
+                       (set-keymap-parent m special-mode-map)
+                       m))
+      (local-set-key (kbd "SPC")   #'org-gmail-feed-detail-scroll-up)
+      (local-set-key (kbd "S-SPC") #'org-gmail-feed-detail-scroll-down)
+      (local-set-key (kbd "DEL")   #'org-gmail-feed-detail-scroll-down)
+      (local-set-key (kbd "I")     #'org-gmail-feed-detail-load-images)
+      (local-set-key (kbd "T")     #'org-gmail-feed-detail-toggle-html)
       (local-set-key (kbd "q") (lambda () (interactive) (quit-window t)))
       (local-set-key (kbd "n") (lambda () (interactive)
                                  (let ((fb org-gmail-feed--detail-feed-buffer))
@@ -2483,6 +2682,8 @@ Headers are inserted immediately; body is fetched asynchronously."
                                                     (nb (org-gmail-feed--build-detail-buffer prev acc fb)))
                                                (switch-to-buffer nb))
                                            (message "Already at oldest email"))))))))
+      (local-set-key (kbd "j") (local-key-binding (kbd "n")))
+      (local-set-key (kbd "k") (local-key-binding (kbd "p")))
       (local-set-key (kbd "RET") (lambda () (interactive)
                                    (condition-case nil
                                        (browse-url-at-point)
@@ -2611,7 +2812,7 @@ Reads the :GMAIL_URL: property; falls back to constructing from :THREAD_ID:."
 (defun org-gmail-feed-help ()
   "Show org-gmail feed key bindings."
   (interactive)
-  (message "c=Do  e=dEfer  d=Delete  a=archive  A=Delegate(fwd)  f=reFile  r=Reply  u=unflag  x=execute  l=filter-accts | RET=full TAB=split o=open s=save n/p=nav v=toggle-view g=refresh q=quit"))
+  (message "c=Do  e=dEfer  d=Delete  a=archive  A=Delegate(fwd)  f=reFile  r=Reply  u=unflag  x=execute  l=filter-accts | RET=full TAB=split o=open s=save n/p j/k=nav v=toggle-view g=refresh q=quit"))
 
 (provide 'org-gmail)
 

@@ -350,5 +350,130 @@ print('---FEED_JSON_END---')
       (delete-file script)
       (when (get-buffer buf-name) (kill-buffer buf-name)))))
 
+;;; ──────────────────────────────────────────────────────────────────────
+;;; Feed navigation at end of buffer; detail-view acts on the right entry
+;;; ──────────────────────────────────────────────────────────────────────
+
+(defun test-org-gmail--feed-with (subjects)
+  "Return a feed buffer with one entry per subject in SUBJECTS."
+  (let ((buf (generate-new-buffer "*test-feed*")))
+    (with-current-buffer buf
+      (org-gmail-feed-mode)
+      (let ((inhibit-read-only t) (i 0))
+        (insert "header\n\n")
+        (dolist (subj subjects)
+          (let ((start (point)))
+            ;; Like `org-gmail--insert-feed-entry': trailing blank line included
+            (insert (format "  Subject: %s\n  From: x\n\n" subj))
+            (put-text-property start (point) 'org-gmail-entry
+                               (list :thread_id (format "t%d" (setq i (1+ i)))
+                                     :subject subj))))))
+    buf))
+
+(ert-deftest test-org-gmail-feed-point-max-does-not-signal ()
+  "At point-max the entry helpers and prev must not signal args-out-of-range."
+  (let ((buf (test-org-gmail--feed-with '("A" "B"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-max))
+          (org-gmail-feed--entry-at-point)
+          (org-gmail-feed--entry-bounds)
+          (goto-char (point-max))
+          (org-gmail-feed-prev)
+          (should (equal (plist-get (org-gmail-feed--entry-at-point) :subject) "B")))
+      (kill-buffer buf))))
+
+(ert-deftest test-org-gmail-feed-goto-thread ()
+  (let ((buf (test-org-gmail--feed-with '("A" "B" "C"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-max))
+          (should (org-gmail-feed--goto-thread "t2"))
+          (should (equal (plist-get (org-gmail-feed--entry-at-point) :subject) "B"))
+          (should-not (org-gmail-feed--goto-thread "missing")))
+      (kill-buffer buf))))
+
+(ert-deftest test-org-gmail-detail-execute-removes-acted-on-entry ()
+  "Archiving from detail view removes that email even if feed point is elsewhere."
+  (let ((buf (test-org-gmail--feed-with '("A" "B" "C")))
+        (triaged nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'org-gmail--triage-thread-async)
+                   (lambda (tid &rest _) (push tid triaged)))
+                  ((symbol-function 'org-gmail-feed--build-detail-buffer)
+                   (lambda (&rest _) (current-buffer)))
+                  ((symbol-function 'switch-to-buffer) #'ignore))
+          (with-current-buffer buf (goto-char (point-max)))
+          (with-temp-buffer
+            (setq-local org-gmail-feed--detail-email '(:thread_id "t2" :subject "B"))
+            (setq-local org-gmail-feed--detail-account "acc")
+            (setq-local org-gmail-feed--detail-feed-buffer buf)
+            (org-gmail-feed--detail-execute 'archive))
+          (should (equal triaged '("t2")))
+          (with-current-buffer buf
+            (should-not (string-match-p "Subject: B" (buffer-string)))
+            (should (string-match-p "Subject: A" (buffer-string)))
+            (should (string-match-p "Subject: C" (buffer-string)))))
+      (kill-buffer buf))))
+
+;;; ──────────────────────────────────────────────────────────────────────
+;;; Section header counts track deletions
+;;; ──────────────────────────────────────────────────────────────────────
+
+(ert-deftest test-org-gmail-feed-section-counts-update-on-delete ()
+  (let ((buf (generate-new-buffer "*test-feed*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (org-gmail-feed-mode)
+          (let ((inhibit-read-only t) (i 0))
+            (insert "header\n\n")
+            (insert (propertize "── UNCAPTURED (2) ─────\n\n" 'face 'bold))
+            (dolist (subj '("A" "B"))
+              (let ((start (point)))
+                (insert (format "  Subject: %s\n\n" subj))
+                (put-text-property start (point) 'org-gmail-entry
+                                   (list :thread_id (format "t%d" (setq i (1+ i)))))))
+            (insert "\n── CAPTURED (1) ─────\n\n")
+            (let ((start (point)))
+              (insert "  Subject: C\n\n")
+              (put-text-property start (point) 'org-gmail-entry '(:thread_id "t3"))))
+          (org-gmail-feed--goto-thread "t1")
+          (org-gmail-feed--delete-entry)
+          (should (string-match-p "UNCAPTURED (1)" (buffer-string)))
+          (should (eq (get-text-property
+                       (1+ (string-match "UNCAPTURED (1)" (buffer-string))) 'face)
+                      'bold))
+          (org-gmail-feed--goto-thread "t3")
+          (org-gmail-feed--delete-entry)
+          (should-not (string-match-p "CAPTURED (" (replace-regexp-in-string
+                                                    "UNCAPTURED" "" (buffer-string))))
+          (should (string-match-p "Subject: B" (buffer-string))))
+      (kill-buffer buf))))
+
+;;; ──────────────────────────────────────────────────────────────────────
+;;; HTML body parsing and the CSP wrapper for webkit rendering
+;;; ──────────────────────────────────────────────────────────────────────
+
+(ert-deftest test-org-gmail-parse-html-output ()
+  (let* ((html "<p>caf\u00e9 ---BODY_END---</p>")
+         (b64  (base64-encode-string (encode-coding-string html 'utf-8) t))
+         (out  (concat "---BODY_START---\nhi\n---BODY_END---\n"
+                       "---HTML_START---\n" b64 "\n---HTML_END---\n")))
+    (should (equal (org-gmail-feed--parse-html-output out) html))
+    (should (equal (car (org-gmail-feed--parse-body-output out)) "hi"))
+    (should-not (org-gmail-feed--parse-html-output
+                 "---BODY_START---\nhi\n---BODY_END---\n"))))
+
+(ert-deftest test-org-gmail-html-wrap-blocks-scripts-and-remote-by-default ()
+  (let ((blocked (org-gmail--html-wrap "<p>x</p>" nil))
+        (allowed (org-gmail--html-wrap "<p>x</p>" t)))
+    (dolist (w (list blocked allowed))
+      (should (string-match-p "Content-Security-Policy" w))
+      (should (string-match-p "default-src 'none'" w))
+      (should-not (string-match-p "script-src" w))
+      (should (string-suffix-p "<p>x</p>" w)))
+    (should-not (string-match-p "img-src[^;]*https:" blocked))
+    (should (string-match-p "img-src[^;]*https:" allowed))))
+
 (provide 'test-org-gmail)
 ;;; test_org_gmail.el ends here
