@@ -304,5 +304,51 @@ SENT
                   test-org-gmail--email-plist 2 "INBOX" "bala")))
     (should (string-match-p "Email preview text" result))))
 
+;;; ──────────────────────────────────────────────────────────────────────
+;;; Integrated feed: one failing account must not hang the feed
+;;; ──────────────────────────────────────────────────────────────────────
+
+(ert-deftest test-org-gmail-fetch-error-reason ()
+  (should (string-match-p "login expired"
+                          (org-gmail-feed--fetch-error-reason
+                           "An error occurred: ('invalid_grant: Bad Request', {})")))
+  (should (equal (org-gmail-feed--fetch-error-reason "An error occurred: quota exceeded\n")
+                 "quota exceeded"))
+  (should (org-gmail-feed--fetch-error-reason "Traceback ...")))
+
+(ert-deftest test-org-gmail-feed-all-renders-when-one-account-fails ()
+  "A failing account is reported; the others' emails still render."
+  (let* ((script (make-temp-file "fake-gmail" nil ".py"
+                                 "import sys
+if 'bad' in sys.argv[sys.argv.index('--credentials') + 1]:
+    print('An error occurred: invalid_grant'); sys.exit(1)
+print('---FEED_JSON_START---')
+print('[{\"msg_id\": \"m1\", \"thread_id\": \"t1\", \"subject\": \"Hello\", \"from\": \"a@b.c\", \"to\": \"\", \"date\": \"<2026-09-28 Mon 10:00>\", \"preview\": \"\"}]')
+print('---FEED_JSON_END---')
+"))
+         (org-gmail-python-script script)
+         (org-agenda-files nil)
+         (org-gmail-accounts '((:name "good" :address "g@x" :credentials "/tmp/good.json")
+                               (:name "bad"  :address "b@x" :credentials "/tmp/bad.json")))
+         (buf-name "*Gmail Feed [integrated]*"))
+    (unwind-protect
+        (progn
+          (when (get-buffer buf-name) (kill-buffer buf-name))
+          (cl-letf (((symbol-function 'org-gmail--build-capture-cache) #'ignore)
+                    ((symbol-function 'org-gmail--is-captured-p) #'ignore))
+            (org-gmail-feed-all)
+            (with-current-buffer buf-name
+              (with-timeout (10 (ert-fail "feed never finished"))
+                (while (or org-gmail-feed--active-procs
+                           (string-match-p "Fetching" (buffer-string)))
+                  (accept-process-output nil 0.1)))
+              (should (= 1 (length org-gmail-feed--all-emails)))
+              (should (equal (caar org-gmail-feed--fetch-errors) "bad"))
+              (should (string-match-p "Hello" (buffer-string)))
+              (should (string-match-p "bad: Google login expired"
+                                      (format "%s" header-line-format))))))
+      (delete-file script)
+      (when (get-buffer buf-name) (kill-buffer buf-name)))))
+
 (provide 'test-org-gmail)
 ;;; test_org_gmail.el ends here

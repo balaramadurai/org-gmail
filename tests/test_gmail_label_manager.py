@@ -84,3 +84,24 @@ def test_convert_to_org_timestamp():
     result = convert_to_org_timestamp(date_str)
     assert result.startswith('<2025-12-07')
     assert '11:00' in result
+
+@patch('gmail_label_manager.build')
+@patch('gmail_label_manager.pickle')
+@patch('gmail_label_manager.InstalledAppFlow')
+@patch('gmail_label_manager.os.path.exists', return_value=True)
+@patch('gmail_label_manager.open', new_callable=mock_open)
+def test_get_gmail_service_reauths_when_refresh_token_revoked(
+        mock_file, mock_exists, mock_flow, mock_pickle, mock_build):
+    from google.auth.exceptions import RefreshError
+    from gmail_label_manager import get_gmail_service
+    stale = Mock(valid=False, expired=True, refresh_token='r')
+    stale.refresh.side_effect = RefreshError('invalid_grant: Bad Request')
+    fresh = Mock(valid=True)
+    mock_pickle.load.return_value = stale
+    mock_flow.from_client_secrets_file.return_value.run_local_server.return_value = fresh
+
+    get_gmail_service('/tmp/creds.json')
+
+    mock_flow.from_client_secrets_file.return_value.run_local_server.assert_called_once()
+    mock_pickle.dump.assert_called_once_with(fresh, mock_file())
+    mock_build.assert_called_once_with('gmail', 'v1', credentials=fresh)

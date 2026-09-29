@@ -1338,6 +1338,9 @@ Keys: Do(c→C), dEfer(e→E), Delete(d→D), archive(a→a), Delegate(A→A), r
 (defvar-local org-gmail-feed--active-procs nil
   "List of running fetch processes for this buffer; cleared when all finish or cancelled.")
 
+(defvar-local org-gmail-feed--fetch-errors nil
+  "Alist of (ACCOUNT-NAME . REASON) for accounts whose last fetch failed.")
+
 (defvar-local org-gmail-feed--sort-key 'date-desc
   "Current sort order for the feed buffer.
 One of: date-desc, date-asc, sender, subject, account.")
@@ -1813,12 +1816,14 @@ Press g inside the feed to discard the cache and re-fetch."
                (lambda (_p out) (setq output-acc (concat output-acc out))))
               (set-process-sentinel
                proc
-               (lambda (p event)
+               (lambda (p _event)
                  (when (buffer-live-p buf)
                    (with-current-buffer buf
                      (setq org-gmail-feed--active-procs
                            (delq p org-gmail-feed--active-procs))))
-                 (when (string-match-p "finished" event)
+                 ;; Any exit counts toward `pending' (a failed account must
+                 ;; not hang the feed); a signal means cancel, so ignore it.
+                 (when (eq (process-status p) 'exit)
                    (let* ((js      (string-match "---FEED_JSON_START---" output-acc))
                           (je      (string-match "---FEED_JSON_END---"   output-acc))
                           (emails  (when (and js je)
@@ -1838,6 +1843,10 @@ Press g inside the feed to discard the cache and re-fetch."
                        (with-current-buffer buf
                          (setq org-gmail-feed--all-emails
                                (append org-gmail-feed--all-emails tagged))
+                         (unless (zerop (process-exit-status p))
+                           (push (cons acc-name
+                                       (org-gmail-feed--fetch-error-reason output-acc))
+                                 org-gmail-feed--fetch-errors))
                          (setq pending (1- pending))
                          (when (zerop pending)
                            (let ((pre-ids org-gmail-feed--pre-refresh-ids)
@@ -1864,7 +1873,28 @@ Press g inside the feed to discard the cache and re-fetch."
                                               (format "%d new email%s arrived"
                                                       new-count
                                                       (if (= new-count 1) "" "s")))))
-                               (message "")))))))))))))))))
+                               (message ""))
+                             (org-gmail-feed--report-fetch-errors))))))))))))))))
+
+(defun org-gmail-feed--fetch-error-reason (output)
+  "Return a short, human-readable failure reason from fetch OUTPUT."
+  (cond
+   ((string-match-p "invalid_grant" output)
+    "Google login expired or revoked — sign in again")
+   ((string-match "An error occurred: \\(.*\\)" output)
+    (truncate-string-to-width (string-trim (match-string 1 output)) 80 nil nil "…"))
+   (t "fetch failed (see *Messages*)")))
+
+(defun org-gmail-feed--report-fetch-errors ()
+  "Show accounts that failed to fetch in the header line and echo area."
+  (when org-gmail-feed--fetch-errors
+    (let ((summary (mapconcat (lambda (e) (format "%s: %s" (car e) (cdr e)))
+                              (reverse org-gmail-feed--fetch-errors) "; ")))
+      (setq header-line-format
+            (propertize (concat " ⚠ Not fetched — " summary "  (g to retry)")
+                        'face 'warning))
+      (message "⚠ org-gmail: %s" summary))))
+
 (defun org-gmail-feed--entry-at-point ()
   "Return the email plist at or nearest to point in the feed buffer."
   (or (get-text-property (point) 'org-gmail-entry)
