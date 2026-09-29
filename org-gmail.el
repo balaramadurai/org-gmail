@@ -1043,31 +1043,35 @@ NOTE, when non-empty, becomes the task heading; the email becomes a sub-heading.
          (gmail-url   (when (not (string-empty-p thread-id))
                         (org-gmail--thread-url thread-id account-name)))
          (has-note    (and note (not (string-empty-p (string-trim note)))))
-         (heading     (if has-note (string-trim note) subject)))
+         (heading     (if has-note (string-trim note) subject))
+         (date-drawer (concat ":" org-gmail-date-drawer ":\n" date "\n:END:"))
+         (props
+          (concat
+           ":PROPERTIES:\n"
+           ":THREAD_ID:     " thread-id "\n"
+           ":EMAIL_ID:      " msg-id "\n"
+           ":FROM:          " from "\n"
+           ":TO:            " to "\n"
+           ":SUBJECT:       " subject "\n"
+           (when gmail-url
+             (concat ":GMAIL_URL:     " gmail-url "\n"))
+           (when (and attachments (not (null attachments)))
+             (concat ":ATTACHMENTS:   "
+                     (mapconcat #'identity attachments ", ") "\n"))
+           (when (and delegated-to (not (string-empty-p delegated-to)))
+             (concat ":DELEGATED_TO:  " delegated-to "\n"))
+           (when (and label (not (string-empty-p label)))
+             (concat ":GMAIL_LABEL:   " label "\n"))
+           (when (and account-name (not (string-empty-p account-name)))
+             (concat ":GMAIL_ACCOUNT: " account-name "\n"))
+           ":END:\n")))
     (concat stars " TODO " heading "\n"
             (when (and scheduled-date (not (string-empty-p scheduled-date)))
               (format "SCHEDULED: %s\n" scheduled-date))
-            ":PROPERTIES:\n"
-            ":THREAD_ID:     " thread-id "\n"
-            ":EMAIL_ID:      " msg-id "\n"
-            ":FROM:          " from "\n"
-            ":TO:            " to "\n"
-            ":SUBJECT:       " subject "\n"
-            (when gmail-url
-              (concat ":GMAIL_URL:     " gmail-url "\n"))
-            (when (and attachments (not (null attachments)))
-              (concat ":ATTACHMENTS:   "
-                      (mapconcat #'identity attachments ", ") "\n"))
-            (when (and delegated-to (not (string-empty-p delegated-to)))
-              (concat ":DELEGATED_TO:  " delegated-to "\n"))
-            (when (and label (not (string-empty-p label)))
-              (concat ":GMAIL_LABEL:   " label "\n"))
-            (when (and account-name (not (string-empty-p account-name)))
-              (concat ":GMAIL_ACCOUNT: " account-name "\n"))
-            ":END:\n"
-            ":" org-gmail-date-drawer ":\n"
-            date "\n"
-            ":END:\n\n"
+            ;; With a note, the task stays clean: properties and the date
+            ;; drawer belong to the referenced email sub-heading.
+            (unless has-note (concat props date-drawer "\n"))
+            "\n"
             (let* ((main-text   (if body-cons
                                     (string-trim (car body-cons))
                                   (string-trim preview)))
@@ -1075,6 +1079,7 @@ NOTE, when non-empty, becomes the task heading; the email becomes a sub-heading.
               (if has-note
                   ;; Email drops to a sub-heading when a note was provided
                   (concat sub-stars " " subject "\n"
+                          props date-drawer "\n"
                           "  From: " from "\n"
                           (when gmail-url (concat "  " gmail-url "\n"))
                           "\n"
@@ -2481,7 +2486,24 @@ Remote images, styles and fonts are blocked unless ALLOW-REMOTE."
     ;; A <meta> before <html> is hoisted into <head> by the HTML parser.
     (concat "<meta http-equiv=\"Content-Security-Policy\" content=\"" csp "\">\n"
             "<meta charset=\"utf-8\">\n"
-            html)))
+            ;; Drop target=... so every click is an ordinary navigation that
+            ;; `org-gmail--xwidget-callback' sees (new-window requests are
+            ;; otherwise silently dropped).
+            (replace-regexp-in-string
+             "[ \t\n]target[ \t]*=[ \t]*\\(\"[^\"]*\"\\|'[^']*'\\|[^ \t\n>]+\\)"
+             "" html t t))))
+
+(defun org-gmail--xwidget-callback (xwidget event-type)
+  "Open links clicked in a rendered email in the system browser.
+XWIDGET is the email's webkit widget; EVENT-TYPE comes from
+`xwidget-event-handler'.  The in-widget navigation is stopped so the
+email stays on screen."
+  (when (eq event-type 'decide-policy)
+    (let ((uri (nth 3 last-input-event)))
+      (when (and (stringp uri)
+                 (string-match-p "\\`\\(https?\\|mailto\\):" uri))
+        (xwidget-webkit-stop-loading xwidget)
+        (browse-url uri)))))
 
 (defun org-gmail-feed--detail-xwidget ()
   "Return the webkit xwidget in the current detail buffer, or nil."
@@ -2514,6 +2536,8 @@ Remote images, styles and fonts are blocked unless ALLOW-REMOTE."
                           600))
                    (xw  (make-xwidget 'webkit "org-gmail" w h nil (current-buffer))))
               (set-xwidget-query-on-exit-flag xw nil)
+              (require 'xwidget)        ; binds [xwidget-event] in special-event-map
+              (xwidget-put xw 'callback #'org-gmail--xwidget-callback)
               (insert (propertize "*" 'display (list 'xwidget :xwidget xw)) "\n")
               (xwidget-webkit-load-html
                xw (org-gmail--html-wrap org-gmail-feed--detail-html
