@@ -1388,6 +1388,8 @@ One of: date-desc, date-asc, sender, subject, account.")
     (define-key map (kbd "f")   #'org-gmail-feed-flag-refile)
     (define-key map (kbd "r")   #'org-gmail-feed-reply)
     (define-key map (kbd "u")   #'org-gmail-feed-unflag)
+    (define-key map (kbd ".")   #'org-gmail-feed-accept-prediction)
+    (define-key map (kbd "*")   #'org-gmail-feed-accept-all-predictions)
     (define-key map (kbd "x")   #'org-gmail-feed-execute)
     (define-key map (kbd "l")   #'org-gmail-feed-filter)
     (define-key map (kbd "S")   #'org-gmail-feed-sort)
@@ -1436,6 +1438,302 @@ One of: date-desc, date-asc, sender, subject, account.")
        org-gmail--capture-cache
        (gethash thread-id org-gmail--capture-cache)))
 
+;;; Action prediction
+;;
+;; Every action executed from the feed (Do, dEfer, Delete, archive, Delegate,
+;; reFile) is appended to `org-gmail-predict-history-file'.  A small naive
+;; Bayes model trained on that history — sender, sender domain, account,
+;; Gmail category, mailing-list status, subject and preview words — suggests
+;; what to do with each new email.  Everything stays on this machine.
+
+(defcustom org-gmail-predict t
+  "When non-nil, suggest an action for each feed email from past behaviour."
+  :type 'boolean
+  :group 'org-gmail)
+
+(defcustom org-gmail-predict-history-file
+  (locate-user-emacs-file "org-gmail-history.eld")
+  "File where executed feed actions are logged for prediction."
+  :type 'file
+  :group 'org-gmail)
+
+(defcustom org-gmail-predict-history-max 5000
+  "Maximum number of past actions kept in the history file."
+  :type 'integer
+  :group 'org-gmail)
+
+(defcustom org-gmail-predict-min-history 10
+  "Number of logged actions needed before suggestions are shown."
+  :type 'integer
+  :group 'org-gmail)
+
+(defcustom org-gmail-predict-min-confidence 0.6
+  "Minimum probability (0–1) for a suggestion to be shown."
+  :type 'number
+  :group 'org-gmail)
+
+(defcustom org-gmail-predict-bulk-confidence 0.85
+  "Minimum probability for `org-gmail-feed-accept-all-predictions' to flag."
+  :type 'number
+  :group 'org-gmail)
+
+(defcustom org-gmail-predict-bulk-actions '(archive delete)
+  "Predicted actions that `org-gmail-feed-accept-all-predictions' may flag.
+Only actions that need no input are allowed: archive, delete and do
+\(Do is flagged with a blank note, so the subject becomes the heading)."
+  :type '(set (const archive) (const delete) (const do))
+  :group 'org-gmail)
+
+(defconst org-gmail-predict--actions '(do defer delete archive delegate refile)
+  "Feed actions the predictor learns and suggests.")
+
+(defconst org-gmail-predict--stopwords
+  '("the" "and" "for" "you" "your" "with" "this" "that" "are" "from" "have"
+    "has" "was" "will" "can" "our" "not" "but" "all" "any" "out" "get" "new"
+    "more" "now" "just" "into" "about" "here" "there" "they" "their" "what"
+    "when" "which" "who" "how" "its" "been" "were" "would" "could" "should"
+    "also" "only" "than" "then" "them" "these" "those" "please" "thanks"
+    "thank" "regards" "dear" "hello")
+  "Words ignored when extracting content features.")
+
+(defvar org-gmail-predict--model nil
+  "Trained model, or nil when not yet loaded.
+A plist (:n DOCS :vocab HASH :classes HASH) where :classes maps an action
+symbol to a vector [DOC-COUNT TOTAL-WEIGHT FEATURE-HASH].")
+
+(defun org-gmail-predict--address (from)
+  "Return the lower-cased bare address in FROM (\"Name <addr>\" or addr)."
+  (downcase (string-trim (if (string-match "<\\([^>]+\\)>" from)
+                             (match-string 1 from)
+                           from))))
+
+(defun org-gmail-predict--tokens (text)
+  "Return the distinct content words of TEXT."
+  (let (out)
+    (dolist (w (split-string (downcase (or text "")) "[^[:alnum:]]+" t))
+      (when (and (<= 3 (length w) 20)
+                 (not (string-match-p "\\`[0-9]+\\'" w))
+                 (not (member w org-gmail-predict--stopwords)))
+        (push w out)))
+    (delete-dups (nreverse out))))
+
+(defun org-gmail-predict--features (email account)
+  "Return weighted features of EMAIL from ACCOUNT as ((FEATURE . WEIGHT) ...).
+Sender identity is weighted above content: it is the strongest habit signal."
+  (let* ((from    (or (plist-get email :from) ""))
+         (subject (or (plist-get email :subject) ""))
+         (addr    (org-gmail-predict--address from))
+         (domain  (org-gmail--extract-domain addr))
+         (feats   nil))
+    (unless (string-empty-p addr) (push (cons (concat "from:" addr) 3.0) feats))
+    (when domain (push (cons (concat "dom:" (downcase domain)) 2.0) feats))
+    (when account (push (cons (concat "acct:" account) 1.0) feats))
+    (when (eq (plist-get email :bulk) t) (push (cons "bulk" 2.0) feats))
+    (dolist (c (plist-get email :categories))
+      (push (cons (concat "cat:" c) 1.0) feats))
+    (when (plist-get email :attachments) (push (cons "attach" 1.0) feats))
+    (cond ((string-match-p "\\`\\s-*re:" (downcase subject)) (push (cons "re" 1.0) feats))
+          ((string-match-p "\\`\\s-*fwd?:" (downcase subject)) (push (cons "fwd" 1.0) feats)))
+    (dolist (w (org-gmail-predict--tokens subject))
+      (push (cons (concat "s:" w) 1.0) feats))
+    (dolist (w (seq-take (org-gmail-predict--tokens (plist-get email :preview)) 30))
+      (push (cons (concat "w:" w) 0.3) feats))
+    (nreverse feats)))
+
+(defun org-gmail-predict--record-to-email (rec)
+  "Return an email plist rebuilt from history record REC."
+  (list :from (plist-get rec :from) :subject (plist-get rec :subject)
+        :preview (plist-get rec :preview) :bulk (plist-get rec :bulk)
+        :categories (plist-get rec :categories)
+        :attachments (plist-get rec :attachments)))
+
+(defun org-gmail-predict--train (model rec)
+  "Add history record REC to MODEL; return MODEL."
+  (let* ((action  (plist-get rec :action))
+         (classes (plist-get model :classes))
+         (vocab   (plist-get model :vocab))
+         (cls     (or (gethash action classes)
+                      (puthash action (vector 0 0.0 (make-hash-table :test 'equal))
+                               classes))))
+    (aset cls 0 (1+ (aref cls 0)))
+    (dolist (f (org-gmail-predict--features
+                (org-gmail-predict--record-to-email rec)
+                (plist-get rec :account)))
+      (puthash (car f) (+ (cdr f) (gethash (car f) (aref cls 2) 0)) (aref cls 2))
+      (aset cls 1 (+ (aref cls 1) (cdr f)))
+      (puthash (car f) t vocab))
+    (plist-put model :n (1+ (plist-get model :n)))))
+
+(defun org-gmail-predict--new-model ()
+  "Return an empty model."
+  (list :n 0
+        :vocab   (make-hash-table :test 'equal)
+        :classes (make-hash-table :test 'eq)))
+
+(defun org-gmail-predict--read-history ()
+  "Return the history records in `org-gmail-predict-history-file', oldest first.
+A truncated or corrupt trailing record is ignored."
+  (let ((file org-gmail-predict-history-file) recs)
+    (when (file-readable-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (condition-case nil
+            (while t
+              (let ((rec (read (current-buffer))))
+                (when (and (consp rec)
+                           (memq (plist-get rec :action) org-gmail-predict--actions))
+                  (push rec recs))))
+          (error nil))))
+    (nreverse recs)))
+
+(defun org-gmail-predict--write-history (recs)
+  "Overwrite the history file with RECS, one record per line."
+  (let ((print-length nil) (print-level nil) (coding-system-for-write 'utf-8))
+    (with-temp-file org-gmail-predict-history-file
+      (dolist (r recs)
+        (prin1 r (current-buffer))
+        (insert "\n")))))
+
+(defun org-gmail-predict--ensure-model ()
+  "Load and train the model from the history file if not done yet."
+  (or org-gmail-predict--model
+      (let* ((recs (org-gmail-predict--read-history))
+             (excess (- (length recs) org-gmail-predict-history-max))
+             (model (org-gmail-predict--new-model)))
+        (when (> excess 0)
+          (setq recs (nthcdr excess recs))
+          (ignore-errors (org-gmail-predict--write-history recs)))
+        (dolist (r recs) (org-gmail-predict--train model r))
+        (setq org-gmail-predict--model model))))
+
+(defun org-gmail-predict-record (email account action)
+  "Log that ACTION was executed on EMAIL from ACCOUNT, and learn from it.
+Errors are reported but never interrupt triage."
+  (when (memq action org-gmail-predict--actions)
+    (condition-case err
+        (let ((rec (list :time (format-time-string "%FT%T%z")
+                         :action action
+                         :account account
+                         :from (plist-get email :from)
+                         :subject (plist-get email :subject)
+                         :preview (plist-get email :preview)
+                         :bulk (eq (plist-get email :bulk) t)
+                         :categories (plist-get email :categories)
+                         :attachments (and (plist-get email :attachments) t)))
+              (print-length nil) (print-level nil)
+              (coding-system-for-write 'utf-8))
+          (make-directory (file-name-directory
+                           (expand-file-name org-gmail-predict-history-file))
+                          t)
+          (with-temp-buffer
+            (prin1 rec (current-buffer))
+            (insert "\n")
+            (write-region nil nil org-gmail-predict-history-file t 'silent))
+          (when org-gmail-predict--model
+            (org-gmail-predict--train org-gmail-predict--model rec)))
+      (error (message "org-gmail: could not log action for prediction: %s"
+                      (error-message-string err))))))
+
+(defun org-gmail-predict--scores (model email account)
+  "Return ((ACTION . PROBABILITY) ...) for EMAIL under MODEL, most likely first."
+  (let* ((n       (plist-get model :n))
+         (classes (plist-get model :classes))
+         (k       (hash-table-count classes))
+         (v       (max 1 (hash-table-count (plist-get model :vocab))))
+         (feats   (org-gmail-predict--features email account))
+         (logps   nil))
+    (maphash
+     (lambda (action cls)
+       (let ((lp (log (/ (+ (aref cls 0) 1.0) (+ n k))))
+             (denom (+ (aref cls 1) v)))
+         (dolist (f feats)
+           (setq lp (+ lp (* (cdr f)
+                             (log (/ (+ (gethash (car f) (aref cls 2) 0) 1.0)
+                                     denom))))))
+         (push (cons action lp) logps)))
+     classes)
+    (when logps
+      (let* ((mx  (apply #'max (mapcar #'cdr logps)))
+             (exps (mapcar (lambda (p) (cons (car p) (exp (- (cdr p) mx)))) logps))
+             (sum (apply #'+ (mapcar #'cdr exps))))
+        (sort (mapcar (lambda (p) (cons (car p) (/ (cdr p) sum))) exps)
+              (lambda (a b) (> (cdr a) (cdr b))))))))
+
+(defun org-gmail-predict--feature-tally (model feature weight)
+  "Return ((ACTION . COUNT) ...) of past emails in MODEL having FEATURE.
+WEIGHT is the feature's weight, used to turn summed weights into counts."
+  (let (out)
+    (maphash (lambda (action cls)
+               (let ((w (gethash feature (aref cls 2))))
+                 (when w (push (cons action (round (/ w weight))) out))))
+             (plist-get model :classes))
+    out))
+
+(defun org-gmail-predict--reason (model email action)
+  "Return a short string explaining why ACTION is predicted for EMAIL."
+  (let* ((addr   (org-gmail-predict--address (or (plist-get email :from) "")))
+         (domain (org-gmail--extract-domain addr))
+         (reason nil))
+    (dolist (spec (list (list (concat "from:" addr) 3.0 "from this sender")
+                        (and domain
+                             (list (concat "dom:" (downcase domain)) 2.0
+                                   (concat "from @" (downcase domain))))))
+      (when (and spec (not reason))
+        (let* ((tally (org-gmail-predict--feature-tally model (car spec) (nth 1 spec)))
+               (hit   (alist-get action tally))
+               (total (apply #'+ (mapcar #'cdr tally))))
+          (when (and hit (> hit 0))
+            (setq reason (format "%d/%d %s" hit total (nth 2 spec)))))))
+    (or reason "similar content")))
+
+(defun org-gmail-predict (email &optional account)
+  "Return a suggestion for EMAIL from ACCOUNT, or nil.
+The result is a plist (:action SYM :confidence P :reason STRING).
+Nil when prediction is off, history is too short, or confidence is low."
+  (when org-gmail-predict
+    (let ((model (ignore-errors (org-gmail-predict--ensure-model))))
+      (when (and model (>= (plist-get model :n) org-gmail-predict-min-history))
+        (let ((best (car (org-gmail-predict--scores model email account))))
+          (when (and best (>= (cdr best) org-gmail-predict-min-confidence))
+            (list :action (car best)
+                  :confidence (cdr best)
+                  :reason (org-gmail-predict--reason model email (car best)))))))))
+
+(defconst org-gmail-predict--labels
+  '((do . "Do") (defer . "dEfer") (delete . "Delete") (archive . "archive")
+    (delegate . "Delegate") (refile . "reFile"))
+  "Display names for predicted actions.")
+
+(defun org-gmail-predict--format (prediction)
+  "Return a one-line display string for PREDICTION, propertized with its flag face."
+  (let ((action (plist-get prediction :action)))
+    (concat
+     (propertize (format "→ %s %d%%"
+                         (alist-get action org-gmail-predict--labels)
+                         (round (* 100 (plist-get prediction :confidence))))
+                 'face (or (cddr (assq action org-gmail-feed--flag-chars)) 'default))
+     (propertize (format " · %s" (plist-get prediction :reason)) 'face 'shadow))))
+
+(defun org-gmail-predict-stats ()
+  "Show how many past actions the predictor has learned from."
+  (interactive)
+  (setq org-gmail-predict--model nil)
+  (let* ((model (org-gmail-predict--ensure-model))
+         parts)
+    (maphash (lambda (action cls)
+               (push (format "%s %d" (alist-get action org-gmail-predict--labels)
+                             (aref cls 0))
+                     parts))
+             (plist-get model :classes))
+    (message "org-gmail predictor: %d action%s logged%s%s"
+             (plist-get model :n)
+             (if (= 1 (plist-get model :n)) "" "s")
+             (if parts (concat " (" (string-join (sort parts #'string<) ", ") ")") "")
+             (if (< (plist-get model :n) org-gmail-predict-min-history)
+                 (format " — suggestions start after %d" org-gmail-predict-min-history)
+               ""))))
+
 (defun org-gmail--insert-feed-entry (email captured-p)
   "Insert one EMAIL entry into the feed buffer. CAPTURED-P applies shadow face.
 The first character of the entry is the flag slot (space = unflagged)."
@@ -1465,6 +1763,11 @@ The first character of the entry is the flag slot (space = unflagged)."
                        (truncate-string-to-width
                         (replace-regexp-in-string "[\n\r]+" " " preview) 70))
                'face 'shadow)))
+    (let ((prediction (org-gmail-predict
+                       email (or (plist-get email :feed_account)
+                                 org-gmail-feed--account-name))))
+      (when prediction
+        (insert "  Suggest: " (org-gmail-predict--format prediction) "\n")))
     (insert "\n")
     (put-text-property start (point) 'org-gmail-entry email)))
 
@@ -1496,7 +1799,7 @@ The first character of the entry is the flag slot (space = unflagged)."
                     account-name org-gmail-feed-days))
     (insert (make-string 60 ?─) "\n")
     (insert "c:Do(TODO)  e:dEfer(sched)  d:Delete  a:archive  A:Delegate(fwd)  f:reFile  r:Reply\n")
-    (insert "u:unflag  x:execute-all  RET:full  TAB:split  o:open  s:save  n/p j/k:next/prev  g:refresh  q:quit\n")
+    (insert "u:unflag  .:suggestion  *:accept-all  x:execute-all  RET:full  TAB:split  o:open  s:save  n/p j/k:next/prev  g:refresh  q:quit\n")
     (insert (make-string 60 ?─) "\n\n")
     (when uncaptured
       (insert (propertize
@@ -1617,7 +1920,7 @@ FILTER-ACCOUNTS is the active filter (list of names or nil for all)."
                       filter-str org-gmail-feed-days))
       (insert (make-string 60 ?─) "\n")
       (insert "c:Do  e:dEfer  d:Delete  a:archive  A:Delegate  f:reFile  r:Reply\n")
-      (insert "u:unflag  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p j/k  v:agenda  g:refresh  q:quit\n")
+      (insert "u:unflag  .:suggestion  *:accept-all  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p j/k  v:agenda  g:refresh  q:quit\n")
       (insert (make-string 60 ?─) "\n\n"))
     (when uncaptured
       (insert (propertize
@@ -1655,7 +1958,7 @@ FILTER-ACCOUNTS is the active account filter (list of names, or nil for all)."
                       filter-str org-gmail-feed-days))
       (insert (make-string 60 ?─) "\n")
       (insert "c:Do  e:dEfer  d:Delete  a:archive  A:Delegate  f:reFile  r:Reply\n")
-      (insert "u:unflag  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p j/k  v:triage  g:refresh  q:quit\n")
+      (insert "u:unflag  .:suggestion  *:accept-all  x:execute  l:filter  RET:full  TAB:split  o:open  s:save  n/p j/k  v:triage  g:refresh  q:quit\n")
       (insert (make-string 60 ?─) "\n\n"))
     (let ((sorted (org-gmail-feed--sort-emails emails 'date-desc))
           (buckets (list (cons 'today     nil)
@@ -2097,6 +2400,63 @@ The hash stores cons cells (flag-sym . extra) so each flag can carry a payload:
   (interactive)
   (org-gmail-feed--apply-flag nil))
 
+;;; Suggestions
+
+(defun org-gmail-feed-accept-prediction ()
+  "Flag the email at point with its suggested action.
+Actions that need input (note, date, recipient, refile target) prompt as usual."
+  (interactive)
+  (let* ((email (org-gmail-feed--entry-at-point))
+         (prediction (and email
+                          (org-gmail-predict
+                           email (or (plist-get email :feed_account)
+                                     org-gmail-feed--account-name)))))
+    (if (not prediction)
+        (message "No suggestion for this email")
+      (call-interactively
+       (pcase (plist-get prediction :action)
+         ('do       #'org-gmail-feed-flag-do)
+         ('defer    #'org-gmail-feed-flag-defer)
+         ('delete   #'org-gmail-feed-flag-delete)
+         ('archive  #'org-gmail-feed-flag-archive)
+         ('delegate #'org-gmail-feed-flag-delegate)
+         ('refile   #'org-gmail-feed-flag-refile))))))
+
+(defun org-gmail-feed-accept-all-predictions ()
+  "Flag every unflagged email whose confident suggestion needs no input.
+Only actions in `org-gmail-predict-bulk-actions' with confidence of at least
+`org-gmail-predict-bulk-confidence' are flagged.  Nothing is executed:
+review the flags, then press x."
+  (interactive)
+  (unless org-gmail-feed--flags
+    (setq org-gmail-feed--flags (make-hash-table :test 'equal)))
+  (let ((counts nil) (pos (point-min)))
+    (while (and pos (< pos (point-max)))
+      (let ((email (get-text-property pos 'org-gmail-entry)))
+        (when email
+          (let* ((tid (or (plist-get email :thread_id) ""))
+                 (prediction (and (not (gethash tid org-gmail-feed--flags))
+                                  (org-gmail-predict
+                                   email (or (plist-get email :feed_account)
+                                             org-gmail-feed--account-name))))
+                 (action (plist-get prediction :action)))
+            (when (and prediction
+                       (memq action org-gmail-predict-bulk-actions)
+                       (>= (plist-get prediction :confidence)
+                           org-gmail-predict-bulk-confidence))
+              (puthash tid (cons action (and (eq action 'do) (list :note "")))
+                       org-gmail-feed--flags)
+              (org-gmail-feed--set-flag-char pos action)
+              (setf (alist-get action counts) (1+ (alist-get action counts 0))))))
+        (setq pos (next-single-property-change pos 'org-gmail-entry))))
+    (if (null counts)
+        (message "No confident suggestions to accept")
+      (message "Flagged %s from suggestions — review, then x to execute"
+               (mapconcat (lambda (c)
+                            (format "%d %s" (cdr c)
+                                    (alist-get (car c) org-gmail-predict--labels)))
+                          (nreverse counts) ", ")))))
+
 (defun org-gmail-feed-reply ()
   "Compose and send a reply to the email at point (immediate, not flagged)."
   (interactive)
@@ -2189,6 +2549,7 @@ delegAte (A) = forward+capture.  After x, refile Do/Defer items with C-c C-w."
             ;; Unflag before acting, so an error later in the batch cannot
             ;; make a retry capture/triage this email a second time.
             (remhash thread-id org-gmail-feed--flags)
+            (org-gmail-predict-record email acc flag-sym)
             (pcase flag-sym
               ('do
                (let ((note (and (listp extra) (plist-get extra :note))))
@@ -2412,6 +2773,7 @@ FLAG-SYM: do, defer, delete, archive, delegate, refile, reply, open-browser."
                              (message "✅ Reply sent to %s" from)
                            (message "⚠️  Reply failed")))))))))))
     (when advance
+      (org-gmail-predict-record email account flag-sym)
       (if (and feed-buf (buffer-live-p feed-buf))
           (with-current-buffer feed-buf
             ;; Locate the acted-on email by thread id: the feed buffer's own
@@ -2621,6 +2983,9 @@ Headers are inserted immediately; body is fetched asynchronously."
                    'face '(:foreground "goldenrod"))))
         (let ((url (org-gmail--thread-url thread-id account-name)))
           (insert (propertize (format "URL:     %s\n" url) 'face 'link)))
+        (let ((prediction (org-gmail-predict email account-name)))
+          (when prediction
+            (insert "Suggest: " (org-gmail-predict--format prediction) "\n")))
         (insert (make-string 70 ?─) "\n\n")
         ;; Body area: placeholder replaced async once full body arrives
         (let* ((body-marker (point-marker)))
@@ -2836,7 +3201,7 @@ Reads the :GMAIL_URL: property; falls back to constructing from :THREAD_ID:."
 (defun org-gmail-feed-help ()
   "Show org-gmail feed key bindings."
   (interactive)
-  (message "c=Do  e=dEfer  d=Delete  a=archive  A=Delegate(fwd)  f=reFile  r=Reply  u=unflag  x=execute  l=filter-accts | RET=full TAB=split o=open s=save n/p j/k=nav v=toggle-view g=refresh q=quit"))
+  (message "c=Do  e=dEfer  d=Delete  a=archive  A=Delegate(fwd)  f=reFile  r=Reply  u=unflag  .=accept-suggestion  *=accept-all-suggestions  x=execute  l=filter-accts | RET=full TAB=split o=open s=save n/p j/k=nav v=toggle-view g=refresh q=quit"))
 
 (provide 'org-gmail)
 

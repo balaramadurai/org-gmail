@@ -134,3 +134,26 @@ def test_fetch_message_body_emits_base64_html_block(mock_details, capsys=None):
     encoded = out.split("---HTML_START---\n")[1].split("\n---HTML_END---")[0]
     assert base64.b64decode(encoded).decode('utf-8') == html
     assert out.index("---BODY_END---") < out.index("---HTML_START---")
+
+
+def test_fetch_recent_emits_prediction_signals():
+    import io, contextlib, json
+    from gmail_label_manager import handle_fetch_recent
+    service = Mock()
+    threads = service.users.return_value.threads.return_value
+    threads.list.return_value.execute.return_value = {'threads': [{'id': 't1'}]}
+    threads.get.return_value.execute.return_value = {'messages': [{
+        'id': 'm1', 'snippet': 'sale',
+        'labelIds': ['INBOX', 'CATEGORY_PROMOTIONS'],
+        'payload': {'headers': [
+            {'name': 'From', 'value': 'news@shop.com'},
+            {'name': 'Subject', 'value': 'Deals'},
+            {'name': 'List-Unsubscribe', 'value': '<mailto:u@shop.com>'}]}}]}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        handle_fetch_recent(service, 7, [])
+    out = buf.getvalue()
+    email = json.loads(out.split("---FEED_JSON_START---")[1]
+                       .split("---FEED_JSON_END---")[0])[0]
+    assert email['bulk'] is True
+    assert email['categories'] == ['CATEGORY_PROMOTIONS']

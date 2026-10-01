@@ -1139,7 +1139,8 @@ def handle_fetch_recent(service, days, agenda_files):
             try:
                 thread = service.users().threads().get(
                     userId='me', id=thread_id, format='metadata',
-                    metadataHeaders=['Subject', 'From', 'To', 'Date']
+                    metadataHeaders=['Subject', 'From', 'To', 'Date',
+                                     'List-Unsubscribe']
                 ).execute()
                 messages = thread.get('messages', [])
                 if not messages:
@@ -1159,6 +1160,11 @@ def handle_fetch_recent(service, days, agenda_files):
                     'date':        convert_to_org_timestamp(headers.get('date', '')),
                     'preview':     latest.get('snippet', '')[:200],
                     'attachments': attachments,
+                    # Signals for org-gmail's action predictor: mailing-list
+                    # mail and Gmail's own category tabs.
+                    'bulk':        'list-unsubscribe' in headers,
+                    'categories':  [l for l in latest.get('labelIds', [])
+                                    if l.startswith('CATEGORY_')],
                 })
             except HttpError as e:
                 logging.warning(f"Failed to fetch thread {thread_id}: {e}")

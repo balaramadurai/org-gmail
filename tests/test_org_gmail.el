@@ -11,6 +11,11 @@
 
 (require 'ert)
 
+;; Keep tests from reading or appending to the user's real action history.
+(setq org-gmail-predict-history-file
+      (make-temp-file "org-gmail-test-history" nil ".eld")
+      org-gmail-predict--model nil)
+
 ;; Load org-gmail from parent directory
 (let ((load-path (cons (expand-file-name ".." (file-name-directory
                                                (or load-file-name buffer-file-name)))
@@ -474,6 +479,119 @@ print('---FEED_JSON_END---')
       (should (string-suffix-p "<p>x</p>" w)))
     (should-not (string-match-p "img-src[^;]*https:" blocked))
     (should (string-match-p "img-src[^;]*https:" allowed))))
+
+;;; ──────────────────────────────────────────────────────────────────────
+;;; Action prediction from past behaviour
+;;; ──────────────────────────────────────────────────────────────────────
+
+(defmacro test-org-gmail--with-history (&rest body)
+  "Run BODY against a fresh, empty prediction history."
+  (declare (indent 0))
+  `(let* ((org-gmail-predict-history-file
+           (make-temp-file "org-gmail-history" nil ".eld"))
+          (org-gmail-predict--model nil)
+          (org-gmail-predict t)
+          (org-gmail-predict-min-history 4)
+          (org-gmail-predict-min-confidence 0.6))
+     (unwind-protect (progn ,@body)
+       (delete-file org-gmail-predict-history-file))))
+
+(defun test-org-gmail--train-sample ()
+  "Log a small history: newsletters archived, a client's mail captured."
+  (dotimes (i 4)
+    (org-gmail-predict-record
+     (list :from "News <news@shop.com>" :subject (format "Weekly deals %d" i)
+           :preview "Big sale on shoes" :bulk t
+           :categories '("CATEGORY_PROMOTIONS"))
+     "bala" 'archive)
+    (org-gmail-predict-record
+     (list :from "Alice <alice@client.com>" :subject (format "Contract review %d" i)
+           :preview "Please review the attached contract" :bulk :false
+           :attachments '("contract.pdf"))
+     "bala" 'do)))
+
+(ert-deftest test-org-gmail-predict-silent-without-history ()
+  (test-org-gmail--with-history
+    (should-not (org-gmail-predict '(:from "a@b.com" :subject "hi") "bala"))))
+
+(ert-deftest test-org-gmail-predict-learns-sender-habit ()
+  (test-org-gmail--with-history
+    (test-org-gmail--train-sample)
+    (let ((p (org-gmail-predict '(:from "news@shop.com" :subject "Flash sale"
+                                  :bulk t)
+                                "bala")))
+      (should (eq (plist-get p :action) 'archive))
+      (should (> (plist-get p :confidence) 0.9))
+      (should (equal (plist-get p :reason) "4/4 from this sender")))
+    (should (eq (plist-get (org-gmail-predict
+                            '(:from "Alice <alice@client.com>" :subject "Contract")
+                            "bala")
+                           :action)
+                'do))))
+
+(ert-deftest test-org-gmail-predict-uses-content-for-unknown-sender ()
+  (test-org-gmail--with-history
+    (test-org-gmail--train-sample)
+    (let ((p (org-gmail-predict
+              '(:from "bob@other.org" :subject "Contract review needed"
+                :preview "Please review the contract")
+              "bala")))
+      (should (eq (plist-get p :action) 'do))
+      (should (equal (plist-get p :reason) "similar content")))))
+
+(ert-deftest test-org-gmail-predict-history-persists-and-trims ()
+  (test-org-gmail--with-history
+    (test-org-gmail--train-sample)
+    (setq org-gmail-predict--model nil)
+    (let ((org-gmail-predict-history-max 3))
+      (should (= 3 (plist-get (org-gmail-predict--ensure-model) :n)))
+      (should (= 3 (length (org-gmail-predict--read-history)))))
+    ;; A truncated trailing record is ignored rather than breaking the load.
+    (write-region "(:action archive :from \"x" nil
+                  org-gmail-predict-history-file t 'silent)
+    (should (= 3 (length (org-gmail-predict--read-history))))))
+
+(ert-deftest test-org-gmail-detail-execute-records-action ()
+  (test-org-gmail--with-history
+    (let ((buf (test-org-gmail--feed-with '("A" "B"))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'org-gmail--triage-thread-async) #'ignore)
+                    ((symbol-function 'org-gmail-feed--build-detail-buffer)
+                     (lambda (&rest _) (current-buffer)))
+                    ((symbol-function 'switch-to-buffer) #'ignore))
+            (with-temp-buffer
+              (setq-local org-gmail-feed--detail-email
+                          '(:thread_id "t1" :subject "A" :from "x@y.com"))
+              (setq-local org-gmail-feed--detail-account "acc")
+              (setq-local org-gmail-feed--detail-feed-buffer buf)
+              (org-gmail-feed--detail-execute 'archive))
+            (let ((recs (org-gmail-predict--read-history)))
+              (should (= 1 (length recs)))
+              (should (eq 'archive (plist-get (car recs) :action)))
+              (should (equal "x@y.com" (plist-get (car recs) :from)))))
+        (kill-buffer buf)))))
+
+(ert-deftest test-org-gmail-feed-accept-all-predictions-flags-confident ()
+  (test-org-gmail--with-history
+    (test-org-gmail--train-sample)
+    (let ((buf (generate-new-buffer "*test-feed*")))
+      (unwind-protect
+          (with-current-buffer buf
+            (org-gmail-feed-mode)
+            (let ((inhibit-read-only t))
+              (insert "header\n\n")
+              (org-gmail--insert-feed-entry
+               '(:thread_id "n1" :subject "Deals" :from "news@shop.com" :bulk t)
+               nil)
+              (org-gmail--insert-feed-entry
+               '(:thread_id "c1" :subject "Contract" :from "alice@client.com")
+               nil))
+            (should (string-match-p "Suggest: → archive" (buffer-string)))
+            (org-gmail-feed-accept-all-predictions)
+            ;; archive is a bulk action; do is not, by default.
+            (should (equal (gethash "n1" org-gmail-feed--flags) '(archive)))
+            (should-not (gethash "c1" org-gmail-feed--flags)))
+        (kill-buffer buf)))))
 
 (provide 'test-org-gmail)
 ;;; test_org_gmail.el ends here
