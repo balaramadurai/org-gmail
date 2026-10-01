@@ -543,7 +543,8 @@ def convert_to_org_timestamp(date_str):
             return "<Unknown Date>"
         if parsed_date.tzinfo is None:
             parsed_date = parsed_date.replace(tzinfo=pytz.UTC)
-        return parsed_date.strftime("<%Y-%m-%d %a %H:%M>")
+        # Convert to the system's local timezone so timestamps match the wall clock
+        return parsed_date.astimezone().strftime("<%Y-%m-%d %a %H:%M>")
     except (TypeError, ValueError):
         print(f"Failed to parse date: {date_str}", file=sys.stderr)
         return "<Unknown Date>"

@@ -593,5 +593,14 @@ print('---FEED_JSON_END---')
             (should-not (gethash "c1" org-gmail-feed--flags)))
         (kill-buffer buf)))))
 
+(ert-deftest test-org-gmail-html-wrap-strips-link-targets ()
+  (let ((w (org-gmail--html-wrap
+            "<a href=\"https://a\" target=\"_blank\">a</a><a href='https://b' TARGET='_new'>b</a><a href=https://c target=_top>c</a>"
+            nil)))
+    (should-not (string-match-p "target" (downcase w)))
+    (should (string-match-p "<a href=\"https://a\">a</a>" w))
+    (should (string-match-p "<a href='https://b'>b</a>" w))
+    (should (string-match-p "<a href=https://c>c</a>" w))))
+
 (provide 'test-org-gmail)
 ;;; test_org_gmail.el ends here
