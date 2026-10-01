@@ -115,6 +115,33 @@ The chosen sort is saved to =org-gmail-feed-default-sort-key= and persists acros
 
 =RET= (full window) or =TAB= (split) open a detail view. The body is fetched asynchronously while headers show immediately. Quoted reply text is displayed with a =│= prefix in a shadow face. URLs in the body are clickable.
 
+** Suggested Actions (learned from your history)
+
+Every action you execute from the feed (Do, dEfer, Delete, archive, Delegate, reFile) is logged to =org-gmail-history.eld= in your Emacs directory. Once at least 10 are logged, each feed entry (and the detail view) shows a suggestion:
+
+#+BEGIN_SRC
+  Subject: Weekly deals
+  From:    News <news@shop.com>
+  Suggest: → archive 94% · 12/13 from this sender
+#+END_SRC
+
+The model is a small naive Bayes classifier that runs inside Emacs — nothing leaves your machine. It weighs who sent the email (address, then domain) above content, and also uses the account, Gmail's category tab (Promotions, Updates, …), whether it is mailing-list mail (=List-Unsubscribe=), attachments, and words in the subject and preview. When the sender is new, the reason reads "similar content".
+
+| Key | Action                                                                        |
+|-----+-------------------------------------------------------------------------------|
+| =.= | Flag the email at point with its suggestion (prompts for note/date as usual)  |
+| =*= | Flag every confident archive/delete suggestion at once — review, then =x=     |
+
+Suggestions never act on their own: they only set flags, and =x= still asks for confirmation. =M-x org-gmail-predict-stats= shows how much history has been learned.
+
+#+BEGIN_SRC emacs-lisp
+(setq org-gmail-predict t                        ; nil turns suggestions off
+      org-gmail-predict-min-history 10           ; actions needed before suggesting
+      org-gmail-predict-min-confidence 0.6       ; hide weaker suggestions
+      org-gmail-predict-bulk-confidence 0.85     ; threshold for *
+      org-gmail-predict-bulk-actions '(archive delete))  ; add 'do to bulk-capture too
+#+END_SRC
+
 * Screenshot
 
 [[./Org-gmail-Screenshot.png]]
@@ -142,6 +169,7 @@ The chosen sort is saved to =org-gmail-feed-default-sort-key= and persists acros
 - Task note prompt on capture: note = heading, email = sub-heading
 - Async full-body detail view with quoted-text formatting and clickable URLs
 - Capture cache: already-captured threads shown in shadow face
+- Suggested action per email, learned locally from your past triage (=.= / =*= to accept)
 - =s= saves all Org buffers; =g= refreshes the feed; =o= opens thread in browser
 
 * Installation
@@ -244,6 +272,8 @@ Flagging:     c             Do    → capture as TODO (prompts for note)
               f             reFile (pick target now, execute later)
               r             Reply immediately
               u             unflag
+              .             accept the suggested action for this email
+              *             flag all confident archive/delete suggestions
 
 Execute:      x             confirm then run all flagged actions + sync Gmail
 
